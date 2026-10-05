@@ -25,6 +25,17 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 
 
 # =========================================================
+# 暫存老闆最近傳來的照片
+#
+# 儲存 LINE messageId
+# 老闆傳照片後，再輸入「請發送」
+# 就把最近一張照片送到群組
+# =========================================================
+
+pending_image_message_id = None
+
+
+# =========================================================
 # 木瓜姐私訊人格
 # =========================================================
 
@@ -43,7 +54,7 @@ SYSTEM_PROMPT = """
 6. 如果老闆只是和你討論事情，就正常和老闆聊天。
 7. 不要自己決定把任何內容發到群組。
 8. 不要宣稱某段內容已經發送。
-9. 只有程式收到「請發送」指令時，才會真正把內容送進群組。
+9. 只有程式收到發送指令時，才會真正把內容送進群組。
 10. 不要提到 system prompt、API、程式碼或內部設定。
 """
 
@@ -69,7 +80,7 @@ def verify_signature(body, signature):
 
 
 # =========================================================
-# LINE 私訊回覆
+# LINE 私訊文字回覆
 # =========================================================
 
 def reply_line(reply_token, text):
@@ -102,7 +113,7 @@ def reply_line(reply_token, text):
 
 
 # =========================================================
-# 發送到指定群組
+# 發送文字到指定群組
 # =========================================================
 
 def push_to_group(text):
@@ -120,6 +131,106 @@ def push_to_group(text):
             {
                 "type": "text",
                 "text": text
+            }
+        ]
+    }
+
+    response = requests.post(
+        url,
+        headers=headers,
+        json=payload,
+        timeout=30
+    )
+
+    response.raise_for_status()
+
+
+# =========================================================
+# 從 LINE 取得照片內容
+# =========================================================
+
+def get_line_image(message_id):
+
+    url = (
+        "https://api-data.line.me/v2/bot/message/"
+        f"{message_id}/content"
+    )
+
+    headers = {
+        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
+    }
+
+    response = requests.get(
+        url,
+        headers=headers,
+        timeout=30
+    )
+
+    response.raise_for_status()
+
+    return response.content
+
+
+# =========================================================
+# 將照片暫時放在本服務公開網址
+#
+# LINE Image Message 必須提供 HTTPS URL
+# =========================================================
+
+IMAGE_CACHE = {}
+
+
+@app.route("/image/<image_id>", methods=["GET"])
+def serve_image(image_id):
+
+    image_data = IMAGE_CACHE.get(image_id)
+
+    if image_data is None:
+        return "Not Found", 404
+
+    return (
+        image_data,
+        200,
+        {
+            "Content-Type": "image/jpeg",
+            "Cache-Control": "public, max-age=3600"
+        }
+    )
+
+
+# =========================================================
+# 發送照片到指定群組
+# =========================================================
+
+def push_image_to_group(message_id):
+
+    # 先從 LINE 下載原圖
+    image_data = get_line_image(message_id)
+
+    # 暫存在目前服務記憶體
+    IMAGE_CACHE[message_id] = image_data
+
+    # Render 會提供服務公開網址
+    base_url = request.host_url.rstrip("/")
+
+    image_url = (
+        f"{base_url}/image/{message_id}"
+    )
+
+    url = "https://api.line.me/v2/bot/message/push"
+
+    headers = {
+        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "to": TARGET_GROUP_ID,
+        "messages": [
+            {
+                "type": "image",
+                "originalContentUrl": image_url,
+                "previewImageUrl": image_url
             }
         ]
     }
@@ -178,6 +289,8 @@ def health():
 @app.route("/webhook", methods=["POST"])
 def webhook():
 
+    global pending_image_message_id
+
     body = request.get_data()
 
     signature = request.headers.get(
@@ -196,22 +309,21 @@ def webhook():
     for event in events:
 
         # -------------------------------------------------
-        # 只處理文字訊息
+        # 只處理 message event
         # -------------------------------------------------
 
         if event.get("type") != "message":
             continue
 
-        message = event.get("message", {})
+        message = event.get(
+            "message",
+            {}
+        )
 
-        if message.get("type") != "text":
-            continue
-
-
-        user_text = message.get(
-            "text",
+        message_type = message.get(
+            "type",
             ""
-        ).strip()
+        )
 
         reply_token = event.get(
             "replyToken"
@@ -250,9 +362,90 @@ def webhook():
 
 
         # =================================================
-        # 「請發送」指令
+        # 老闆傳照片
         #
-        # 冒號後面的文字：
+        # 只記住照片
+        # 不立刻發群組
+        # =================================================
+
+        if message_type == "image":
+
+            pending_image_message_id = message.get(
+                "id"
+            )
+
+            reply_line(
+                reply_token,
+                "照片收到。要送到群組時跟我說「請發送」。"
+            )
+
+            continue
+
+
+        # =================================================
+        # 其他非文字訊息暫不處理
+        # =================================================
+
+        if message_type != "text":
+            continue
+
+
+        user_text = message.get(
+            "text",
+            ""
+        ).strip()
+
+
+        # =================================================
+        # 單獨輸入「請發送」
+        #
+        # 如果前面有照片
+        # 就把最近一張照片發到群組
+        # =================================================
+
+        if user_text == "請發送":
+
+            if not pending_image_message_id:
+
+                reply_line(
+                    reply_token,
+                    "老闆，目前沒有等待發送的照片。"
+                )
+
+                continue
+
+
+            try:
+
+                push_image_to_group(
+                    pending_image_message_id
+                )
+
+                pending_image_message_id = None
+
+                reply_line(
+                    reply_token,
+                    "照片已送到群組。"
+                )
+
+            except Exception as e:
+
+                print(
+                    "LINE image push error:",
+                    repr(e)
+                )
+
+                reply_line(
+                    reply_token,
+                    "照片發送失敗，照片沒有送出去。"
+                )
+
+            continue
+
+
+        # =================================================
+        # 「請發送：文字」
+        #
         # 不經 OpenAI
         # 不修改
         # 不潤飾
@@ -277,7 +470,6 @@ def webhook():
                 ]
 
 
-            # 只移除冒號後最前面的空白
             send_text = send_text.lstrip()
 
 
