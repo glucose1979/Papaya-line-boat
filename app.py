@@ -100,7 +100,7 @@ if user_text == "查ID":
     if source_type == "group":
         text += f"\n\n這個群組的 Group ID：\n{group_id}"
     reply_line(reply_token, text)
-    continuey:
+    continuey
             response = client.responses.create(
                 model="gpt-5-mini",
                 instructions=SYSTEM_PROMPT,
