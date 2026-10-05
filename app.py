@@ -2,6 +2,7 @@ import os
 import base64
 import hashlib
 import hmac
+import re
 import requests
 
 from flask import Flask, request, abort
@@ -26,13 +27,11 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 
 # =========================================================
 # 暫存老闆最近傳來的照片
-#
-# 儲存 LINE messageId
-# 老闆傳照片後，再輸入「請發送」
-# 就把最近一張照片送到群組
 # =========================================================
 
 pending_image_message_id = None
+
+IMAGE_CACHE = {}
 
 
 # =========================================================
@@ -146,7 +145,7 @@ def push_to_group(text):
 
 
 # =========================================================
-# 從 LINE 取得照片內容
+# 從 LINE 下載照片
 # =========================================================
 
 def get_line_image(message_id):
@@ -172,13 +171,8 @@ def get_line_image(message_id):
 
 
 # =========================================================
-# 將照片暫時放在本服務公開網址
-#
-# LINE Image Message 必須提供 HTTPS URL
+# 提供暫存照片給 LINE 讀取
 # =========================================================
-
-IMAGE_CACHE = {}
-
 
 @app.route("/image/<image_id>", methods=["GET"])
 def serve_image(image_id):
@@ -204,13 +198,10 @@ def serve_image(image_id):
 
 def push_image_to_group(message_id):
 
-    # 先從 LINE 下載原圖
     image_data = get_line_image(message_id)
 
-    # 暫存在目前服務記憶體
     IMAGE_CACHE[message_id] = image_data
 
-    # Render 會提供服務公開網址
     base_url = request.host_url.rstrip("/")
 
     image_url = (
@@ -362,10 +353,9 @@ def webhook():
 
 
         # =================================================
-        # 老闆傳照片
+        # 收到照片
         #
-        # 只記住照片
-        # 不立刻發群組
+        # 先記住照片，不立即發送
         # =================================================
 
         if message_type == "image":
@@ -383,7 +373,7 @@ def webhook():
 
 
         # =================================================
-        # 其他非文字訊息暫不處理
+        # 其他非文字訊息先不處理
         # =================================================
 
         if message_type != "text":
@@ -399,8 +389,7 @@ def webhook():
         # =================================================
         # 單獨輸入「請發送」
         #
-        # 如果前面有照片
-        # 就把最近一張照片發到群組
+        # 發送最近收到的照片
         # =================================================
 
         if user_text == "請發送":
@@ -444,40 +433,45 @@ def webhook():
 
 
         # =================================================
-        # 「請發送：文字」
+        # 文字發送指令
         #
-        # 不經 OpenAI
-        # 不修改
-        # 不潤飾
-        # 原封不動送到群組
+        # 以下格式全部支援：
+        #
+        # 請發送：文字
+        # 請發送:文字
+        # 請發送 ：文字
+        # 請發送 : 文字
+        # 請發送 文字
+        #
+        # 發送內容不經 OpenAI
+        # 不修改、不潤飾
         # =================================================
 
-        if (
-            user_text.startswith("請發送：")
-            or user_text.startswith("請發送:")
-        ):
+        send_match = re.match(
+            r"^請發送\s*[：:]\s*(.+)$",
+            user_text,
+            flags=re.DOTALL
+        )
 
-            if user_text.startswith("請發送："):
+        if not send_match:
 
-                send_text = user_text[
-                    len("請發送："):
-                ]
-
-            else:
-
-                send_text = user_text[
-                    len("請發送:"):
-                ]
+            send_match = re.match(
+                r"^請發送[ \t]+(.+)$",
+                user_text,
+                flags=re.DOTALL
+            )
 
 
-            send_text = send_text.lstrip()
+        if send_match:
+
+            send_text = send_match.group(1)
 
 
-            if not send_text:
+            if not send_text.strip():
 
                 reply_line(
                     reply_token,
-                    "老闆，「請發送：」後面還沒有內容。"
+                    "老闆，請發送後面還沒有內容。"
                 )
 
                 continue
@@ -497,7 +491,7 @@ def webhook():
             except Exception as e:
 
                 print(
-                    "LINE push error:",
+                    "LINE text push error:",
                     repr(e)
                 )
 
@@ -512,8 +506,8 @@ def webhook():
         # =================================================
         # 其他所有私訊
         #
-        # 都只是木瓜姐和老闆私人聊天
-        # 絕對不送到群組
+        # 正常跟木瓜姐聊天
+        # 絕對不送群組
         # =================================================
 
         try:
