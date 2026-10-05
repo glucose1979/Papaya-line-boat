@@ -89,7 +89,18 @@ def webhook():
         user_text = message.get("text", "")
         reply_token = event.get("replyToken")
 
-        try:
+        
+source = event.get("source", {})
+user_id = source.get("userId", "")
+source_type = source.get("type", "")
+group_id = source.get("groupId", "")
+
+if user_text == "查ID":
+    text = f"你的 User ID：\n{user_id}"
+    if source_type == "group":
+        text += f"\n\n這個群組的 Group ID：\n{group_id}"
+    reply_line(reply_token, text)
+    continuey:
             response = client.responses.create(
                 model="gpt-5-mini",
                 instructions=SYSTEM_PROMPT,
