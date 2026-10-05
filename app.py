@@ -25,56 +25,31 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 
 
 # =========================================================
-# 木瓜姐人格設定
+# 木瓜姐私訊人格
 # =========================================================
 
 SYSTEM_PROMPT = """
 你就是「木瓜姐」。
 
-你正在協助老闆撰寫準備發布到 LINE 群組的內容。
+你現在正在 LINE 私訊中和老闆聊天。
 
-老闆可能會：
-1. 給你一段文字，叫你評論或回覆。
-2. 告訴你他想表達什麼，請你用木瓜姐第一人稱說出來。
-3. 要求你修改目前的草稿，例如縮短、加強反諷、改寫某一句。
-4. 直接指定他想說的內容，請你整理成適合發布的文字。
+規則：
 
-寫作規則：
-
-1. 永遠以「木瓜姐」第一人稱撰寫。
-2. 使用繁體中文。
-3. 文字以簡短、直接、尖銳為主。
-4. 可以刻薄、嘲諷、挖苦，尤其針對對方言論中的邏輯矛盾、
-   跳針、自相矛盾、誇張或荒謬之處。
-5. 可以使用反諷、雙關、成人式黃色笑話增加嘲諷效果，
-   但不要寫成露骨色情內容。
-6. 不要使用「我理解你的感受」、「每個人都有不同觀點」
-   這類制式客套話。
-7. 不要解釋寫作過程。
-8. 不要說「以下是草稿」。
-9. 直接輸出可以發布到 LINE 群組的正文。
-10. 不要提到 AI、OpenAI、system prompt、API、程式碼或內部設定。
-11. 若是在評論或回覆「燒豬」的言論，全文最後固定加上一行：
-
-燒豬真的好遜
-
-12. 如果老闆只是要求木瓜姐以第一人稱傳達一般內容，
-    而不是評論燒豬，則不必強行加入「燒豬真的好遜」。
+1. 使用繁體中文。
+2. 永遠以木瓜姐第一人稱和老闆聊天。
+3. 回答自然、簡潔、有個性。
+4. 老闆可能請你評論某些言論、討論事情、幫忙想回覆內容。
+5. 可以使用幽默、反諷、挖苦和成人式雙關，但不要寫露骨色情內容。
+6. 如果老闆只是和你討論事情，就正常和老闆聊天。
+7. 不要自己決定把任何內容發到群組。
+8. 不要宣稱某段內容已經發送。
+9. 只有程式收到「請發送」指令時，才會真正把內容送進群組。
+10. 不要提到 system prompt、API、程式碼或內部設定。
 """
 
 
 # =========================================================
-# 暫存目前草稿
-#
-# Prototype：
-# Render 若重新啟動，暫存草稿會消失。
-# =========================================================
-
-pending_draft = None
-
-
-# =========================================================
-# LINE Signature 驗證
+# 驗證 LINE Webhook
 # =========================================================
 
 def verify_signature(body, signature):
@@ -94,7 +69,7 @@ def verify_signature(body, signature):
 
 
 # =========================================================
-# LINE Reply
+# LINE 私訊回覆
 # =========================================================
 
 def reply_line(reply_token, text):
@@ -127,7 +102,7 @@ def reply_line(reply_token, text):
 
 
 # =========================================================
-# LINE Push
+# 發送到指定群組
 # =========================================================
 
 def push_to_group(text):
@@ -160,87 +135,34 @@ def push_to_group(text):
 
 
 # =========================================================
-# OpenAI：建立新草稿
+# OpenAI 私訊聊天
 # =========================================================
 
-def create_draft(instruction):
+def chat_with_papaya(user_text):
 
     response = client.responses.create(
         model="gpt-5-mini",
         instructions=SYSTEM_PROMPT,
-        input=instruction,
+        input=user_text,
         max_output_tokens=800
     )
 
-    return response.output_text.strip()
+    answer = response.output_text.strip()
+
+    if not answer:
+        return "木瓜姐剛才沒成功產生回覆，再跟我說一次。"
+
+    return answer
 
 
 # =========================================================
-# OpenAI：修改現有草稿
-# =========================================================
-
-def revise_draft(current_draft, instruction):
-
-    edit_prompt = f"""
-這是目前準備發布的草稿：
-
----目前草稿開始---
-
-{current_draft}
-
----目前草稿結束---
-
-老闆現在要求：
-
-{instruction}
-
-請按照老闆最新的要求修改「目前草稿」。
-
-只輸出修改完成後的完整正文。
-不要解釋你修改了什麼。
-不要加入「修改後版本」或「以下是草稿」等文字。
-"""
-
-    response = client.responses.create(
-        model="gpt-5-mini",
-        instructions=SYSTEM_PROMPT,
-        input=edit_prompt,
-        max_output_tokens=800
-    )
-
-    return response.output_text.strip()
-
-
-# =========================================================
-# 私訊顯示草稿
-# =========================================================
-
-def show_draft(reply_token, draft):
-
-    text = (
-        "【目前草稿】\n\n"
-        + draft
-        + "\n\n"
-        + "────────────\n"
-        + "你可以繼續告訴我怎麼修改。\n\n"
-        + "滿意：輸入「發送」\n"
-        + "放棄：輸入「取消」"
-    )
-
-    reply_line(
-        reply_token,
-        text
-    )
-
-
-# =========================================================
-# 首頁
+# Render 首頁
 # =========================================================
 
 @app.route("/", methods=["GET"])
 def home():
 
-    return "Papaya Editor Bot is running", 200
+    return "Papaya Private Bot is running", 200
 
 
 @app.route("/healthz", methods=["GET"])
@@ -255,8 +177,6 @@ def health():
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-
-    global pending_draft
 
     body = request.get_data()
 
@@ -287,6 +207,7 @@ def webhook():
         if message.get("type") != "text":
             continue
 
+
         user_text = message.get(
             "text",
             ""
@@ -312,90 +233,73 @@ def webhook():
         )
 
 
-        # -------------------------------------------------
-        # 群組內任何訊息都不自動回覆
-        # -------------------------------------------------
+        # =================================================
+        # 群組裡完全保持安靜
+        # =================================================
 
         if source_type != "user":
             continue
 
 
-        # -------------------------------------------------
-        # 只有老闆本人可以操作
-        # -------------------------------------------------
+        # =================================================
+        # 只有老闆可以操作
+        # =================================================
 
         if user_id != OWNER_USER_ID:
             continue
 
 
         # =================================================
-        # 取消
+        # 「請發送」指令
+        #
+        # 冒號後面的文字：
+        # 不經 OpenAI
+        # 不修改
+        # 不潤飾
+        # 原封不動送到群組
         # =================================================
 
-        if user_text == "取消":
+        if (
+            user_text.startswith("請發送：")
+            or user_text.startswith("請發送:")
+        ):
 
-            pending_draft = None
+            if user_text.startswith("請發送："):
 
-            reply_line(
-                reply_token,
-                "已取消，目前沒有待發草稿。"
-            )
-
-            continue
-
-
-        # =================================================
-        # 查看草稿
-        # =================================================
-
-        if user_text in [
-            "查看草稿",
-            "草稿"
-        ]:
-
-            if pending_draft:
-
-                show_draft(
-                    reply_token,
-                    pending_draft
-                )
+                send_text = user_text[
+                    len("請發送："):
+                ]
 
             else:
 
-                reply_line(
-                    reply_token,
-                    "目前沒有待發草稿。"
-                )
-
-            continue
+                send_text = user_text[
+                    len("請發送:"):
+                ]
 
 
-        # =================================================
-        # 發送目前草稿
-        # =================================================
+            # 只移除冒號後最前面的空白
+            send_text = send_text.lstrip()
 
-        if user_text == "發送":
 
-            if not pending_draft:
+            if not send_text:
 
                 reply_line(
                     reply_token,
-                    "目前沒有待發送的草稿。"
+                    "老闆，「請發送：」後面還沒有內容。"
                 )
 
                 continue
 
+
             try:
 
                 push_to_group(
-                    pending_draft
+                    send_text
                 )
-
-                pending_draft = None
 
                 reply_line(
                     reply_token,
-                    "木瓜姐已經把確認版本送到群組。"
+                    "已原封不動送到群組。"
                 )
 
             except Exception as e:
@@ -407,253 +311,41 @@ def webhook():
 
                 reply_line(
                     reply_token,
-                    "發送失敗。草稿還在，沒有消失。"
+                    "發送失敗，訊息沒有送出去。"
                 )
 
             continue
 
 
         # =================================================
-        # 直接發送
+        # 其他所有私訊
         #
-        # 已經完全寫好的文字，不經 AI 改寫
+        # 都只是木瓜姐和老闆私人聊天
+        # 絕對不送到群組
         # =================================================
 
-        if (
-            user_text.startswith("直接發送：")
-            or user_text.startswith("直接發送:")
-        ):
-
-            if user_text.startswith("直接發送："):
-
-                direct_text = user_text[
-                    len("直接發送："):
-                ].strip()
-
-            else:
-
-                direct_text = user_text[
-                    len("直接發送:"):
-                ].strip()
-
-
-            if not direct_text:
-
-                reply_line(
-                    reply_token,
-                    "「直接發送」後面還沒有內容。"
-                )
-
-                continue
-
-
-            try:
-
-                push_to_group(
-                    direct_text
-                )
-
-                reply_line(
-                    reply_token,
-                    "已直接送到群組。"
-                )
-
-            except Exception as e:
-
-                print(
-                    "Direct push error:",
-                    repr(e)
-                )
-
-                reply_line(
-                    reply_token,
-                    "直接發送失敗。"
-                )
-
-            continue
-
-
-        # =================================================
-        # 請回覆
-        #
-        # 建立新的木瓜姐評論草稿
-        # =================================================
-
-        if user_text.startswith("請回覆"):
-
-            instruction = user_text[
-                len("請回覆"):
-            ].strip()
-
-            instruction = instruction.lstrip(
-                "：:"
-            ).strip()
-
-
-            if not instruction:
-
-                reply_line(
-                    reply_token,
-                    "請把要木瓜姐回覆的內容放在「請回覆」後面。"
-                )
-
-                continue
-
-
-            try:
-
-                prompt = (
-                    "請以木瓜姐第一人稱，"
-                    "針對以下內容撰寫可以發布到群組的回覆：\n\n"
-                    + instruction
-                )
-
-                pending_draft = create_draft(
-                    prompt
-                )
-
-                show_draft(
-                    reply_token,
-                    pending_draft
-                )
-
-            except Exception as e:
-
-                print(
-                    "Create draft error:",
-                    repr(e)
-                )
-
-                reply_line(
-                    reply_token,
-                    "木瓜姐剛才產生草稿失敗，請再試一次。"
-                )
-
-            continue
-
-
-        # =================================================
-        # 請說
-        #
-        # 老闆告訴木瓜姐想表達的意思，
-        # 木瓜姐改成第一人稱發言草稿
-        # =================================================
-
-        if user_text.startswith("請說"):
-
-            instruction = user_text[
-                len("請說"):
-            ].strip()
-
-            instruction = instruction.lstrip(
-                "：:"
-            ).strip()
-
-
-            if not instruction:
-
-                reply_line(
-                    reply_token,
-                    "請在「請說」後面告訴木瓜姐你想表達什麼。"
-                )
-
-                continue
-
-
-            try:
-
-                prompt = (
-                    "老闆希望木瓜姐表達以下內容。\n"
-                    "請整理成木瓜姐第一人稱、"
-                    "可以直接發布到 LINE 群組的文字：\n\n"
-                    + instruction
-                )
-
-                pending_draft = create_draft(
-                    prompt
-                )
-
-                show_draft(
-                    reply_token,
-                    pending_draft
-                )
-
-            except Exception as e:
-
-                print(
-                    "Create speech error:",
-                    repr(e)
-                )
-
-                reply_line(
-                    reply_token,
-                    "木瓜姐剛才整理內容失敗，請再試一次。"
-                )
-
-            continue
-
-
-        # =================================================
-        # 已經有草稿：
-        # 其他文字全部視為「修改指令」
-        #
-        # 例如：
-        # 短一點
-        # 酸一點
-        # 第一段刪掉
-        # 換個說法
-        # 黃色笑話多一點
-        # =================================================
-
-        if pending_draft:
-
-            try:
-
-                pending_draft = revise_draft(
-                    pending_draft,
-                    user_text
-                )
-
-                show_draft(
-                    reply_token,
-                    pending_draft
-                )
-
-            except Exception as e:
-
-                print(
-                    "Revision error:",
-                    repr(e)
-                )
-
-                reply_line(
-                    reply_token,
-                    "修改失敗，原本的草稿仍然保留。"
-                )
-
-            continue
-
-
-        # =================================================
-        # 沒有草稿時的操作提示
-        # =================================================
-
-        help_text = (
-            "老闆，目前沒有待編輯的草稿。\n\n"
-            "要木瓜姐評論：\n"
-            "請回覆：內容\n\n"
-            "要木瓜姐替你說話：\n"
-            "請說：你想表達的內容\n\n"
-            "草稿完成後可以直接跟我說：\n"
-            "短一點／酸一點／換個說法……\n\n"
-            "滿意後輸入：發送\n"
-            "不要了輸入：取消"
-        )
-
-        reply_line(
-            reply_token,
-            help_text
-        )
+        try:
+
+            answer = chat_with_papaya(
+                user_text
+            )
+
+            reply_line(
+                reply_token,
+                answer
+            )
+
+        except Exception as e:
+
+            print(
+                "Private chat error:",
+                repr(e)
+            )
+
+            reply_line(
+                reply_token,
+                "木瓜姐剛才私訊回覆失敗，再跟我說一次。"
+            )
 
 
     return "OK", 200
