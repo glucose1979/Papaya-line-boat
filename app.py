@@ -238,21 +238,170 @@ def push_image_to_group(message_id):
 
 # =========================================================
 # OpenAI 私訊聊天
+#
+# gpt-5-mini 回覆前會先推理。推理 token 和看得到的回覆
+# 共用 max_output_tokens。沒指定時預設想得比較多，
+# 800 的額度有時被推理用完，output_text 是空的，
+# status 為 incomplete（原因多半是 max_output_tokens）。
+# 私訊用 low 就夠，推理少、也比較省。真的空了才重試一次。
 # =========================================================
+
+CHAT_MODEL = "gpt-5-mini"
+CHAT_REASONING_EFFORT = "low"
+CHAT_MAX_OUTPUT_TOKENS = 2000
+CHAT_RETRY_REASONING_EFFORT = "minimal"
+CHAT_RETRY_MAX_OUTPUT_TOKENS = 3000
+
+EMPTY_CHAT_REPLY = "木瓜姐剛才沒成功產生回覆，再跟我說一次。"
+
+
+def _visible_reply(response):
+
+    text = getattr(response, "output_text", None)
+
+    if not isinstance(text, str):
+        return ""
+
+    return text.strip()
+
+
+def _incomplete_reason(response):
+
+    details = getattr(response, "incomplete_details", None)
+
+    if details is None:
+        return None
+
+    if isinstance(details, dict):
+        return details.get("reason")
+
+    return getattr(details, "reason", None)
+
+
+def _usage_counts(response):
+
+    usage = getattr(response, "usage", None)
+
+    if usage is None:
+        return None, None
+
+    if isinstance(usage, dict):
+        output_tokens = usage.get("output_tokens")
+        details = usage.get("output_tokens_details") or {}
+        if not isinstance(details, dict):
+            details = {}
+        return output_tokens, details.get("reasoning_tokens")
+
+    output_tokens = getattr(usage, "output_tokens", None)
+    details = getattr(usage, "output_tokens_details", None)
+    reasoning_tokens = None
+
+    if isinstance(details, dict):
+        reasoning_tokens = details.get("reasoning_tokens")
+    elif details is not None:
+        reasoning_tokens = getattr(
+            details,
+            "reasoning_tokens",
+            None
+        )
+
+    return output_tokens, reasoning_tokens
+
+
+def _output_item_types(response):
+
+    items = getattr(response, "output", None) or []
+    types = []
+
+    for item in items:
+
+        if isinstance(item, dict):
+            types.append(item.get("type"))
+        else:
+            types.append(getattr(item, "type", None))
+
+    return types
+
+
+def _log_chat_response(response, attempt):
+
+    try:
+
+        output_tokens, reasoning_tokens = _usage_counts(
+            response
+        )
+
+        print(
+            "OpenAI chat:",
+            f"attempt={attempt}",
+            f"status={getattr(response, 'status', None)}",
+            f"incomplete_reason={_incomplete_reason(response)}",
+            f"output_tokens={output_tokens}",
+            f"reasoning_tokens={reasoning_tokens}",
+            f"output_types={_output_item_types(response)}",
+            f"has_text={bool(_visible_reply(response))}"
+        )
+
+    except Exception as e:
+
+        print(
+            "OpenAI chat log error:",
+            repr(e)
+        )
+
+
+def _create_chat_response(
+    user_text,
+    effort,
+    max_output_tokens
+):
+
+    return client.responses.create(
+        model=CHAT_MODEL,
+        instructions=SYSTEM_PROMPT,
+        input=user_text,
+        max_output_tokens=max_output_tokens,
+        reasoning={
+            "effort": effort
+        }
+    )
+
 
 def chat_with_papaya(user_text):
 
-    response = client.responses.create(
-        model="gpt-5-mini",
-        instructions=SYSTEM_PROMPT,
-        input=user_text,
-        max_output_tokens=800
+    response = _create_chat_response(
+        user_text,
+        CHAT_REASONING_EFFORT,
+        CHAT_MAX_OUTPUT_TOKENS
     )
 
-    answer = response.output_text.strip()
+    _log_chat_response(response, attempt=1)
+
+    answer = _visible_reply(response)
+
+    if answer:
+        return answer
+
+    print(
+        "OpenAI chat empty output, retrying once:",
+        f"status={getattr(response, 'status', None)}",
+        f"incomplete_reason={_incomplete_reason(response)}",
+        f"next_effort={CHAT_RETRY_REASONING_EFFORT}",
+        f"next_max_output_tokens={CHAT_RETRY_MAX_OUTPUT_TOKENS}"
+    )
+
+    response = _create_chat_response(
+        user_text,
+        CHAT_RETRY_REASONING_EFFORT,
+        CHAT_RETRY_MAX_OUTPUT_TOKENS
+    )
+
+    _log_chat_response(response, attempt=2)
+
+    answer = _visible_reply(response)
 
     if not answer:
-        return "木瓜姐剛才沒成功產生回覆，再跟我說一次。"
+        return EMPTY_CHAT_REPLY
 
     return answer
 
