@@ -7,7 +7,7 @@ import threading
 import time
 import requests
 
-from flask import Flask, request, abort
+from flask import Flask, request, abort, jsonify, make_response
 from openai import OpenAI
 
 
@@ -25,6 +25,15 @@ OWNER_USER_ID = os.environ["OWNER_USER_ID"]
 TARGET_GROUP_ID = os.environ["TARGET_GROUP_ID"]
 
 client = OpenAI(api_key=OPENAI_API_KEY)
+
+# Private AI proofreading for https://glucose1979.github.io/dictation/
+# Disabled unless FIX_PASSWORD is set in the environment.
+FIX_ALLOWED_ORIGIN = "https://glucose1979.github.io"
+FIX_MAX_CHARS = 6000
+FIX_ALLOWED_LANGS = ("zh-TW", "en-US")
+FIX_MODEL = "gpt-5-mini"
+FIX_REASONING_EFFORT = "low"
+FIX_RETRY_REASONING_EFFORT = "minimal"
 
 
 # =========================================================
@@ -770,6 +779,227 @@ def chat_with_papaya(user_text, user_id):
     )
 
     return answer
+
+
+# =========================================================
+# Private AI proofreading (/fix)
+#
+# Used by the static dictation page. Password from FIX_PASSWORD.
+# Never log the password or the submitted / corrected text.
+# =========================================================
+
+FIX_SYSTEM_PROMPT = """
+You are a careful proofreader for speech-to-text transcripts.
+
+Tasks:
+- Fix typos and wrongly recognized homophones from speech recognition.
+- Fix grammar and punctuation.
+- Make sentences flow naturally.
+- Keep the original meaning, tone, and language.
+- Preserve paragraph and line breaks.
+- Preserve medical and urology terms as written when they are correct technical usage.
+- For Chinese, use Traditional Chinese with Taiwan usage.
+- Output only the corrected text. No explanations, labels, or quotation marks around the whole result.
+"""
+
+
+def _fix_password_configured():
+
+    return bool(os.environ.get("FIX_PASSWORD") or "")
+
+
+def _fix_password_matches(provided):
+
+    expected = os.environ.get("FIX_PASSWORD") or ""
+
+    if not expected:
+        return False
+
+    if not isinstance(provided, str):
+        return False
+
+    # Hash first so unequal lengths stay constant-time.
+    left = hashlib.sha256(provided.encode("utf-8")).digest()
+    right = hashlib.sha256(expected.encode("utf-8")).digest()
+
+    return hmac.compare_digest(left, right)
+
+
+def _fix_cors(response):
+
+    response.headers["Access-Control-Allow-Origin"] = FIX_ALLOWED_ORIGIN
+    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    response.headers["Access-Control-Max-Age"] = "86400"
+    response.headers["Vary"] = "Origin"
+
+    return response
+
+
+def _fix_json(payload, status):
+
+    return _fix_cors(make_response(jsonify(payload), status))
+
+
+def _fix_max_output_tokens(text_len):
+
+    # Proofreading output ≈ input length; leave room for low reasoning.
+    return min(8000, max(512, text_len + 800))
+
+
+def _fix_retry_max_output_tokens(text_len):
+
+    return min(8000, max(768, text_len + 1200))
+
+
+def _create_fix_response(text, lang, effort, max_output_tokens):
+
+    lang_note = (
+        "Language: Traditional Chinese (Taiwan)."
+        if lang == "zh-TW"
+        else "Language: English (en-US)."
+    )
+
+    return client.responses.create(
+        model=FIX_MODEL,
+        instructions=FIX_SYSTEM_PROMPT,
+        input=[
+            {
+                "role": "user",
+                "content": (
+                    f"{lang_note}\n\n"
+                    "Correct the following transcript:\n\n"
+                    f"{text}"
+                )
+            }
+        ],
+        max_output_tokens=max_output_tokens,
+        reasoning={
+            "effort": effort
+        }
+    )
+
+
+def _log_fix_response(response, attempt):
+
+    try:
+
+        output_tokens, reasoning_tokens = _usage_counts(
+            response
+        )
+
+        print(
+            "OpenAI fix:",
+            f"attempt={attempt}",
+            f"status={getattr(response, 'status', None)}",
+            f"incomplete_reason={_incomplete_reason(response)}",
+            f"output_tokens={output_tokens}",
+            f"reasoning_tokens={reasoning_tokens}",
+            f"output_types={_output_item_types(response)}",
+            f"has_text={bool(_visible_reply(response))}"
+        )
+
+    except Exception as e:
+
+        print(
+            "OpenAI fix log error:",
+            repr(e)
+        )
+
+
+def proofread_text(text, lang):
+
+    max_tokens = _fix_max_output_tokens(len(text))
+
+    response = _create_fix_response(
+        text,
+        lang,
+        FIX_REASONING_EFFORT,
+        max_tokens
+    )
+
+    _log_fix_response(response, attempt=1)
+
+    answer = _visible_reply(response)
+
+    if not answer:
+
+        print(
+            "OpenAI fix empty output, retrying once:",
+            f"status={getattr(response, 'status', None)}",
+            f"incomplete_reason={_incomplete_reason(response)}",
+            f"next_effort={FIX_RETRY_REASONING_EFFORT}",
+            f"next_max_output_tokens={_fix_retry_max_output_tokens(len(text))}"
+        )
+
+        response = _create_fix_response(
+            text,
+            lang,
+            FIX_RETRY_REASONING_EFFORT,
+            _fix_retry_max_output_tokens(len(text))
+        )
+
+        _log_fix_response(response, attempt=2)
+
+        answer = _visible_reply(response)
+
+    return answer
+
+
+@app.route("/fix", methods=["OPTIONS"])
+def fix_options():
+
+    return _fix_cors(make_response("", 204))
+
+
+@app.route("/fix", methods=["POST"])
+def fix():
+
+    if not _fix_password_configured():
+        return _fix_json({"error": "disabled"}, 403)
+
+    data = request.get_json(silent=True)
+
+    if not isinstance(data, dict):
+        return _fix_json({"error": "invalid json"}, 400)
+
+    password = data.get("password", "")
+
+    if not _fix_password_matches(password):
+        return _fix_json({"error": "unauthorized"}, 401)
+
+    text = data.get("text", "")
+    lang = data.get("lang", "")
+
+    if not isinstance(text, str):
+        return _fix_json({"error": "invalid text"}, 400)
+
+    if not text.strip():
+        return _fix_json({"error": "empty text"}, 400)
+
+    if len(text) > FIX_MAX_CHARS:
+        return _fix_json({"error": "text too long"}, 413)
+
+    if lang not in FIX_ALLOWED_LANGS:
+        return _fix_json({"error": "invalid lang"}, 400)
+
+    try:
+
+        corrected = proofread_text(text, lang)
+
+    except Exception as e:
+
+        print(
+            "Fix proofread error:",
+            type(e).__name__
+        )
+
+        return _fix_json({"error": "upstream failure"}, 502)
+
+    if not corrected:
+        return _fix_json({"error": "empty model output"}, 502)
+
+    return _fix_json({"text": corrected}, 200)
 
 
 # =========================================================
