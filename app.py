@@ -1,14 +1,18 @@
 import os
 import base64
+import glob
 import hashlib
 import hmac
 import re
+import shutil
+import subprocess
+import tempfile
 import threading
 import time
 import requests
 
 from flask import Flask, request, abort, jsonify, make_response
-from openai import OpenAI
+from openai import APITimeoutError, OpenAI
 
 
 # =========================================================
@@ -34,6 +38,60 @@ FIX_ALLOWED_LANGS = ("zh-TW", "en-US")
 FIX_MODEL = "gpt-5-mini"
 FIX_REASONING_EFFORT = "low"
 FIX_RETRY_REASONING_EFFORT = "minimal"
+
+# Private audio transcription (POST /transcribe) for the same dictation page.
+# Password is the multipart form field "password" — the same field name /fix
+# reads from JSON. CORS matches /fix. Never log the password or the transcript.
+TRANSCRIBE_MODEL_DEFAULT = "gpt-4o-mini-transcribe"
+TRANSCRIBE_MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+TRANSCRIBE_OPENAI_MAX_BYTES = 24 * 1024 * 1024
+TRANSCRIBE_CHUNK_TARGET_BYTES = 20 * 1024 * 1024
+TRANSCRIBE_MAX_SECONDS = 60 * 60
+TRANSCRIBE_MAX_CHUNKS = 8
+TRANSCRIBE_DEADLINE_SECONDS = 80
+TRANSCRIBE_API_TIMEOUT_SECONDS = 50
+TRANSCRIBE_FFMPEG_TIMEOUT_SECONDS = 45
+TRANSCRIBE_ALLOWED_EXTENSIONS = {
+    ".flac",
+    ".mp3",
+    ".mp4",
+    ".mpeg",
+    ".mpga",
+    ".m4a",
+    ".ogg",
+    ".wav",
+    ".webm",
+}
+TRANSCRIBE_MIME_EXTENSIONS = {
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "audio/mp4": ".m4a",
+    "audio/m4a": ".m4a",
+    "audio/x-m4a": ".m4a",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/wave": ".wav",
+    "audio/webm": ".webm",
+    "video/webm": ".webm",
+    "audio/ogg": ".ogg",
+    "application/ogg": ".ogg",
+    "video/ogg": ".ogg",
+    "audio/flac": ".flac",
+    "audio/x-flac": ".flac",
+    "video/mp4": ".mp4",
+    "audio/mpga": ".mpga",
+}
+TRANSCRIBE_PROMPT_ZH = (
+    "請用繁體中文（臺灣用詞）與標點轉寫，醫學與泌尿科用語請正確書寫。"
+)
+TRANSCRIBE_PROMPT_EN = (
+    "Transcribe in English with punctuation. Preserve medical terms."
+)
+TRANSCRIBE_PROMPT_AUTO = (
+    "若是中文，請用繁體中文（臺灣用詞）與標點轉寫；若是英文則用英文轉寫。"
+)
+
+app.config["MAX_CONTENT_LENGTH"] = TRANSCRIBE_MAX_UPLOAD_BYTES
 
 
 # =========================================================
@@ -1000,6 +1058,740 @@ def fix():
         return _fix_json({"error": "empty model output"}, 502)
 
     return _fix_json({"text": corrected}, 200)
+
+
+# =========================================================
+# Private audio transcription (/transcribe)
+#
+# Multipart fields: file, lang (optional), password.
+# password is the same field name /fix reads from JSON.
+# Auth failures use the same status and JSON shape as /fix.
+# =========================================================
+
+class TranscribeError(Exception):
+
+    def __init__(self, message, status):
+
+        super().__init__(message)
+
+        self.status = status
+
+
+_opencc_s2twp = None
+_opencc_lock = threading.Lock()
+
+
+def _transcribe_model():
+
+    model = (os.environ.get("TRANSCRIBE_MODEL") or "").strip()
+
+    return model or TRANSCRIBE_MODEL_DEFAULT
+
+
+def _normalize_transcribe_lang(raw):
+
+    if raw is None:
+        return None
+
+    if not isinstance(raw, str):
+        raise TranscribeError("語言請選中文或英文", 400)
+
+    value = raw.strip().lower().replace("_", "-")
+
+    if value == "":
+        return None
+
+    if value in ("zh", "zh-tw", "zh-hant"):
+        return "zh"
+
+    if value in ("en", "en-us"):
+        return "en"
+
+    raise TranscribeError("語言請選中文或英文", 400)
+
+
+def _audio_extension(upload):
+
+    filename = os.path.basename(upload.filename or "")
+    ext = os.path.splitext(filename)[1].lower()
+
+    if ext in (".oga", ".opus"):
+        ext = ".ogg"
+
+    if ext in TRANSCRIBE_ALLOWED_EXTENSIONS:
+        return ext
+
+    mime = (upload.mimetype or "").split(";", 1)[0].strip().lower()
+    mapped = TRANSCRIBE_MIME_EXTENSIONS.get(mime)
+
+    if mapped in TRANSCRIBE_ALLOWED_EXTENSIONS:
+        return mapped
+
+    return None
+
+
+_ffmpeg_exe_cached = None
+_ffmpeg_exe_checked = False
+
+
+def _ffmpeg_exe():
+
+    global _ffmpeg_exe_cached
+    global _ffmpeg_exe_checked
+
+    if _ffmpeg_exe_checked:
+        return _ffmpeg_exe_cached
+
+    found = shutil.which("ffmpeg")
+
+    if not found:
+
+        env_exe = (os.environ.get("IMAGEIO_FFMPEG_EXE") or "").strip()
+
+        if env_exe and os.path.isfile(env_exe):
+            found = env_exe
+
+    if not found:
+
+        try:
+
+            import imageio_ffmpeg
+
+            found = imageio_ffmpeg.get_ffmpeg_exe()
+
+        except Exception:
+
+            found = None
+
+    if found:
+
+        _ffmpeg_exe_checked = True
+        _ffmpeg_exe_cached = found
+
+    return found
+
+
+def _probe_duration_seconds(path, ffmpeg):
+
+    try:
+
+        proc = subprocess.run(
+            [ffmpeg, "-hide_banner", "-i", path],
+            capture_output=True,
+            timeout=20,
+        )
+
+    except Exception:
+
+        return None
+
+    text = proc.stderr.decode("utf-8", "replace")
+    match = re.search(
+        r"Duration:\s*(\d+):(\d\d):(\d\d(?:\.\d+)?)",
+        text,
+    )
+
+    if not match:
+        return None
+
+    hours = int(match.group(1))
+    minutes = int(match.group(2))
+    seconds = float(match.group(3))
+
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def _run_ffmpeg(args, timeout):
+
+    try:
+
+        proc = subprocess.run(
+            args,
+            capture_output=True,
+            timeout=timeout,
+        )
+
+    except subprocess.TimeoutExpired:
+
+        raise TranscribeError(
+            "錄音較長，這次沒有在時間內轉完，請分成較短的幾段再上傳",
+            504,
+        )
+
+    if proc.returncode != 0:
+
+        raise TranscribeError(
+            "無法處理這個錄音檔，請換成 mp3 或較小的檔案再試",
+            400,
+        )
+
+    return proc
+
+
+def _chunk_paths(workdir, prefix):
+
+    paths = sorted(
+        path
+        for path in glob.glob(os.path.join(workdir, prefix + "*"))
+        if os.path.isfile(path) and os.path.getsize(path) > 0
+    )
+
+    return paths
+
+
+def _remove_paths(paths):
+
+    for path in paths:
+
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def _split_reencode(path, workdir, ffmpeg):
+
+    # 64 kbps mono is about 8 KB/s, so a 20 MB piece is ~40 minutes.
+    # Speech stays intelligible and each piece stays under OpenAI's cap.
+    seg = max(
+        30.0,
+        (TRANSCRIBE_CHUNK_TARGET_BYTES * 0.9) / 8000.0,
+    )
+    pattern = os.path.join(workdir, "enc_%03d.mp3")
+
+    _run_ffmpeg(
+        [
+            ffmpeg,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            path,
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "libmp3lame",
+            "-b:a",
+            "64k",
+            "-f",
+            "segment",
+            "-segment_time",
+            f"{seg:.3f}",
+            "-reset_timestamps",
+            "1",
+            pattern,
+        ],
+        timeout=TRANSCRIBE_FFMPEG_TIMEOUT_SECONDS,
+    )
+
+    parts = _chunk_paths(workdir, "enc_")
+
+    if not parts:
+
+        raise TranscribeError(
+            "無法處理這個錄音檔，請換成 mp3 或較小的檔案再試",
+            400,
+        )
+
+    if len(parts) > TRANSCRIBE_MAX_CHUNKS:
+
+        raise TranscribeError(
+            "錄音檔太大，請分成較短的幾段再上傳",
+            413,
+        )
+
+    for part in parts:
+
+        if os.path.getsize(part) > TRANSCRIBE_OPENAI_MAX_BYTES:
+
+            raise TranscribeError(
+                "錄音檔太大，請先轉成較小的 mp3 再上傳",
+                413,
+            )
+
+    return parts
+
+
+def _split_audio(path, workdir, ffmpeg):
+
+    ext = os.path.splitext(path)[1].lower()
+
+    if ext not in TRANSCRIBE_ALLOWED_EXTENSIONS:
+        ext = ".mp3"
+
+    size = os.path.getsize(path)
+    duration = _probe_duration_seconds(path, ffmpeg)
+
+    if duration and duration > 0 and size > 0:
+
+        seg = duration * (
+            float(TRANSCRIBE_CHUNK_TARGET_BYTES) / float(size)
+        )
+        seg = max(1.0, seg)
+
+    else:
+
+        seg = 600.0
+
+    pattern = os.path.join(workdir, "part_%03d" + ext)
+
+    try:
+
+        _run_ffmpeg(
+            [
+                ffmpeg,
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                path,
+                "-map",
+                "0:a:0",
+                "-f",
+                "segment",
+                "-segment_time",
+                f"{seg:.3f}",
+                "-reset_timestamps",
+                "1",
+                "-c",
+                "copy",
+                pattern,
+            ],
+            timeout=TRANSCRIBE_FFMPEG_TIMEOUT_SECONDS,
+        )
+
+        parts = _chunk_paths(workdir, "part_")
+
+    except TranscribeError as exc:
+
+        if exc.status == 504:
+            raise
+
+        parts = []
+
+    oversized = [
+        part
+        for part in parts
+        if os.path.getsize(part) > TRANSCRIBE_OPENAI_MAX_BYTES
+    ]
+
+    if (
+        not parts
+        or oversized
+        or len(parts) > TRANSCRIBE_MAX_CHUNKS
+    ):
+
+        _remove_paths(parts)
+
+        return _split_reencode(path, workdir, ffmpeg)
+
+    return parts
+
+
+def _audio_parts(path):
+
+    size = os.path.getsize(path)
+
+    if size <= 0:
+        raise TranscribeError("錄音檔是空的", 400)
+
+    if size > TRANSCRIBE_MAX_UPLOAD_BYTES:
+        raise TranscribeError("檔案太大，請壓到 100 MB 以內", 413)
+
+    ffmpeg = _ffmpeg_exe()
+    duration = None
+
+    if ffmpeg:
+
+        duration = _probe_duration_seconds(path, ffmpeg)
+
+        if duration and duration > TRANSCRIBE_MAX_SECONDS:
+
+            raise TranscribeError(
+                "錄音超過 60 分鐘，請分段後再上傳",
+                413,
+            )
+
+    if size <= TRANSCRIBE_OPENAI_MAX_BYTES:
+        return [path], duration
+
+    if not ffmpeg:
+
+        raise TranscribeError(
+            "檔案超過 24 MB，伺服器無法自動分段，請先壓縮或切開再上傳",
+            413,
+        )
+
+    workdir = os.path.dirname(path)
+    parts = _split_audio(path, workdir, ffmpeg)
+
+    if path not in parts:
+
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+    return parts, duration
+
+
+def _prompt_for(lang, previous):
+
+    if previous:
+
+        snippet = " ".join(previous.split())
+
+        return snippet[-200:]
+
+    if lang == "zh":
+        return TRANSCRIBE_PROMPT_ZH
+
+    if lang == "en":
+        return TRANSCRIBE_PROMPT_EN
+
+    return TRANSCRIBE_PROMPT_AUTO
+
+
+def _response_format_for(model):
+
+    if (model or "").startswith("whisper"):
+        return "verbose_json"
+
+    return "json"
+
+
+def _duration_from_response(response):
+
+    if isinstance(response, str):
+        return None
+
+    usage = getattr(response, "usage", None)
+    seconds = None
+
+    if isinstance(usage, dict):
+        seconds = usage.get("seconds")
+    elif usage is not None:
+        seconds = getattr(usage, "seconds", None)
+
+    if isinstance(seconds, (int, float)):
+        return float(seconds)
+
+    raw = getattr(response, "duration", None)
+
+    if isinstance(raw, (int, float)):
+        return float(raw)
+
+    return None
+
+
+def _text_from_response(response):
+
+    if isinstance(response, str):
+        return response.strip()
+
+    text = getattr(response, "text", None)
+
+    if not isinstance(text, str):
+        return ""
+
+    return text.strip()
+
+
+def _to_traditional_taiwan(text):
+
+    global _opencc_s2twp
+
+    if not text:
+        return ""
+
+    try:
+
+        with _opencc_lock:
+
+            if _opencc_s2twp is None:
+
+                import opencc
+
+                _opencc_s2twp = opencc.OpenCC("s2twp")
+
+            return _opencc_s2twp.convert(text)
+
+    except Exception as exc:
+
+        print(
+            "Transcribe opencc error:",
+            type(exc).__name__,
+        )
+
+        return text
+
+
+def _create_transcription(path, lang, prompt, model, timeout):
+
+    ext = os.path.splitext(path)[1].lower() or ".mp3"
+    kwargs = {
+        "model": model,
+        "prompt": prompt,
+        "response_format": _response_format_for(model),
+        "timeout": timeout,
+    }
+
+    if lang in ("zh", "en"):
+        kwargs["language"] = lang
+
+    with open(path, "rb") as handle:
+
+        kwargs["file"] = (f"audio{ext}", handle)
+
+        return client.audio.transcriptions.create(**kwargs)
+
+
+def _log_transcribe(model, nbytes, duration_sec, chunks, lang):
+
+    if duration_sec is None:
+        duration_text = "unknown"
+    else:
+        duration_text = f"{float(duration_sec):.1f}"
+
+    print(
+        "OpenAI transcribe:",
+        f"model={model}",
+        f"bytes={nbytes}",
+        f"duration_sec={duration_text}",
+        f"chunks={chunks}",
+        f"lang={lang or 'auto'}",
+    )
+
+
+def _join_transcript(parts, lang):
+
+    pieces = [
+        part.strip()
+        for part in parts
+        if isinstance(part, str) and part.strip()
+    ]
+
+    if not pieces:
+        return ""
+
+    if lang == "en":
+        return " ".join(pieces)
+
+    return "".join(pieces)
+
+
+def transcribe_audio(path, lang):
+
+    nbytes = os.path.getsize(path)
+    parts, probed = _audio_parts(path)
+    model = _transcribe_model()
+    deadline = time.monotonic() + TRANSCRIBE_DEADLINE_SECONDS
+    texts = []
+    api_seconds = []
+    previous = ""
+
+    for part in parts:
+
+        remaining = deadline - time.monotonic()
+
+        if remaining < 12:
+
+            raise TranscribeError(
+                "錄音較長，這次沒有在時間內轉完，請分成較短的幾段再上傳",
+                504,
+            )
+
+        timeout = min(
+            float(TRANSCRIBE_API_TIMEOUT_SECONDS),
+            remaining - 2,
+        )
+        prompt = _prompt_for(lang, previous)
+
+        try:
+
+            response = _create_transcription(
+                part,
+                lang,
+                prompt,
+                model,
+                timeout,
+            )
+
+        except TranscribeError:
+
+            raise
+
+        except APITimeoutError:
+
+            raise TranscribeError(
+                "語音轉文字逾時，請把錄音分成較短的幾段再上傳",
+                504,
+            )
+
+        except Exception as exc:
+
+            print(
+                "Transcribe error:",
+                type(exc).__name__,
+            )
+
+            raise TranscribeError(
+                "語音轉文字失敗，請稍後再試",
+                502,
+            )
+
+        text = _text_from_response(response)
+        seconds = _duration_from_response(response)
+
+        if lang != "en":
+            text = _to_traditional_taiwan(text)
+
+        texts.append(text)
+        previous = text
+
+        if seconds is not None:
+            api_seconds.append(seconds)
+
+    if api_seconds:
+        duration_sec = sum(api_seconds)
+    else:
+        duration_sec = probed
+
+    _log_transcribe(
+        model,
+        nbytes,
+        duration_sec,
+        len(parts),
+        lang,
+    )
+
+    transcript = _join_transcript(texts, lang)
+
+    if not transcript:
+        raise TranscribeError("沒有辨識到文字", 502)
+
+    return transcript
+
+
+@app.route("/transcribe", methods=["OPTIONS"])
+def transcribe_options():
+
+    return _fix_cors(make_response("", 204))
+
+
+@app.errorhandler(413)
+def request_too_large(error):
+
+    if request.path == "/transcribe":
+
+        return _fix_json(
+            {
+                "ok": False,
+                "error": "檔案太大，請壓到 100 MB 以內",
+            },
+            413,
+        )
+
+    if hasattr(error, "get_response"):
+        return error.get_response()
+
+    return "Request Entity Too Large", 413
+
+
+@app.route("/transcribe", methods=["POST"])
+def transcribe():
+
+    if not _fix_password_configured():
+        return _fix_json({"error": "disabled"}, 403)
+
+    # Same field name as /fix. /fix reads it from JSON; this route reads
+    # it from the multipart form because the body is the audio file.
+    password = request.form.get("password", "")
+
+    if not isinstance(password, str):
+        password = ""
+
+    if not _fix_password_matches(password):
+        return _fix_json({"error": "unauthorized"}, 401)
+
+    try:
+
+        lang = _normalize_transcribe_lang(request.form.get("lang"))
+
+    except TranscribeError as exc:
+
+        return _fix_json(
+            {"ok": False, "error": str(exc)},
+            exc.status,
+        )
+
+    upload = request.files.get("file")
+
+    if upload is None:
+
+        return _fix_json(
+            {"ok": False, "error": "請上傳錄音檔"},
+            400,
+        )
+
+    ext = _audio_extension(upload)
+
+    if ext is None:
+
+        if not (upload.filename or "").strip():
+
+            return _fix_json(
+                {"ok": False, "error": "請上傳錄音檔"},
+                400,
+            )
+
+        return _fix_json(
+            {
+                "ok": False,
+                "error": "不支援的錄音格式，請改用 mp3、m4a、wav 或 webm",
+            },
+            400,
+        )
+
+    workdir = tempfile.mkdtemp(prefix="transcribe-")
+
+    try:
+
+        src = os.path.join(workdir, "upload" + ext)
+        upload.save(src)
+        text = transcribe_audio(src, lang)
+
+    except TranscribeError as exc:
+
+        return _fix_json(
+            {"ok": False, "error": str(exc)},
+            exc.status,
+        )
+
+    except Exception as exc:
+
+        print(
+            "Transcribe error:",
+            type(exc).__name__,
+        )
+
+        return _fix_json(
+            {"ok": False, "error": "語音轉文字失敗，請稍後再試"},
+            502,
+        )
+
+    finally:
+
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    return _fix_json({"ok": True, "text": text}, 200)
 
 
 # =========================================================
