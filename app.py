@@ -14,6 +14,8 @@ import requests
 from flask import Flask, request, abort, jsonify, make_response
 from openai import APITimeoutError, OpenAI
 
+import video_download
+
 
 # =========================================================
 # 基本設定
@@ -2073,6 +2075,20 @@ def webhook():
 
 
     return "OK", 200
+
+
+# =========================================================
+# 私人影片下載頁 /dl
+#
+# 跟 /transcribe 共用 FIX_PASSWORD。頁面沒有從其他路由連出去。
+# =========================================================
+
+video_download.register(
+    app,
+    _ffmpeg_exe,
+    _fix_password_configured,
+    _fix_password_matches,
+)
 
 
 # =========================================================
