@@ -6,14 +6,14 @@ Line AI boat (木瓜姐).
 
 In a group chat, when the sender’s LINE display name is `Hung Chang Chen` (case-insensitive; extra spaces ignored) and the message insults the bot, the AI, or its replies, the bot answers with **one** short comeback. The name is read from the [group member profile API](https://developers.line.biz/en/reference/messaging-api/#get-group-member-profile) and cached in memory for 12 hours. The reply uses the reply token, not push, so it does not spend the monthly push quota.
 
-Other group messages stay silent. Private chat, `請發送`, `/fix`, `/transcribe`, and `/dl` are unchanged.
+Other group messages stay silent. Other private messages, `請發送`, `/fix`, `/transcribe`, and `/dl` are unchanged.
 
-This bot already sets `OWNER_USER_ID`, so only that user can toggle the mode, by typing these in the group:
+This bot already sets `OWNER_USER_ID`, so only that user can toggle the mode. Typing either line in the 1:1 private chat or in a group flips the same global switch, which controls group comebacks:
 
 - `吵架模式開`
 - `吵架模式關`
 
-A trailing `。` or `!` is ignored. Anyone else typing them is ignored. The bot replies `吵架模式開了。` or `吵架模式關了。`
+A trailing `。` or `!` is ignored. Anyone else typing them is ignored. The bot replies in that same chat with `吵架模式開了。` or `吵架模式關了。` These two lines are not sent to the private-chat model and are not pushed to the group.
 
 The switch defaults to **on** after deploy. `吵架模式開` / `吵架模式關` override that until the process restarts. A restart or a new deploy clears the in-memory override and the name cache, then starts again from `COMEBACK_MODE` (on when that variable is unset). Keep gunicorn at one worker, the same constraint `/dl` already documents, so the override is the one the group sees.
 

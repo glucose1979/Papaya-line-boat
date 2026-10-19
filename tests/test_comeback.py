@@ -784,6 +784,77 @@ class WebhookTests(unittest.TestCase):
         )
         self.assertNotIn("私訊照常回。", comeback.COMEBACK_LINES)
 
+    def test_private_toggle_is_global_and_skips_chat(self):
+        off = self._post_event(self._text_event("吵架模式關"))
+
+        self.assertEqual(off.status_code, 200)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(len(self.posts), 1)
+        self.assertEqual(
+            self.posts[0]["url"],
+            "https://api.line.me/v2/bot/message/reply",
+        )
+        self.assertEqual(
+            self.posts[0]["json"]["replyToken"],
+            "reply-token",
+        )
+        self.assertEqual(
+            self.posts[0]["json"]["messages"][0]["text"],
+            "吵架模式關了。",
+        )
+        self.assertFalse(comeback.comeback_enabled())
+        self.assertEqual(app.load_chat_history("Uowner"), [])
+
+        blocked = self._post_event(
+            self._text_event(
+                "垃圾AI",
+                user_id="Uhung",
+                source_type="group",
+            )
+        )
+        self.assertEqual(blocked.status_code, 200)
+        self.assertEqual(len(self.posts), 1)
+        self.assertEqual(self.gets, [])
+
+        stranger = self._post_event(
+            self._text_event(
+                "吵架模式開",
+                user_id="Uother",
+            )
+        )
+        self.assertEqual(stranger.status_code, 200)
+        self.assertFalse(comeback.comeback_enabled())
+        self.assertEqual(len(self.posts), 1)
+        self.assertEqual(self.calls, [])
+
+        on = self._post_event(self._text_event("  吵架模式開。 "))
+
+        self.assertEqual(on.status_code, 200)
+        self.assertTrue(comeback.comeback_enabled())
+        self.assertEqual(
+            self.posts[-1]["json"]["messages"][0]["text"],
+            "吵架模式開了。",
+        )
+        self.assertEqual(self.calls, [])
+
+        hit = self._post_event(
+            self._text_event(
+                "廢物AI",
+                user_id="Uhung",
+                source_type="group",
+            )
+        )
+        self.assertEqual(hit.status_code, 200)
+        self.assertEqual(
+            self.posts[-1]["url"],
+            "https://api.line.me/v2/bot/message/reply",
+        )
+        self.assertIn(
+            self.posts[-1]["json"]["messages"][0]["text"],
+            comeback.COMEBACK_LINES,
+        )
+        self.assertEqual(len(self.gets), 1)
+
     def test_profile_failure_still_returns_200(self):
         def broken_get(url, headers=None, timeout=None):
             raise RuntimeError("line down")

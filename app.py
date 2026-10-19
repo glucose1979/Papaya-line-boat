@@ -2020,6 +2020,46 @@ def webhook():
 
 
         # =================================================
+        # 吵架模式開關
+        #
+        # 老闆在私訊輸入，跟在群組輸入是同一個全行程開關，
+        # 管的是群組回嘴。這兩句不進聊天，也不送到群組。
+        # =================================================
+
+        toggle = comeback.parse_toggle(user_text)
+
+        if toggle is not None:
+
+            comeback.set_comeback_enabled(toggle)
+
+            if toggle:
+
+                reply_line(
+                    reply_token,
+                    comeback.TOGGLE_ON_REPLY,
+                )
+
+                print(
+                    "Comeback mode:",
+                    "toggle_on"
+                )
+
+            else:
+
+                reply_line(
+                    reply_token,
+                    comeback.TOGGLE_OFF_REPLY,
+                )
+
+                print(
+                    "Comeback mode:",
+                    "toggle_off"
+                )
+
+            continue
+
+
+        # =================================================
         # 單獨輸入「請發送」
         #
         # 發送最近收到的照片

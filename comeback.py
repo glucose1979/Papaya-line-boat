@@ -4,10 +4,11 @@ In a group, a message from the display name "Hung Chang Chen" that
 insults the bot, the AI, or its replies gets one short reply. The
 reply uses the webhook reply token. Push is never used.
 
-The on/off switch starts from COMEBACK_MODE (default on) and can be
-overridden in memory by the owner. A process restart drops the
-override and the display-name cache, then starts from the env default
-again. Render's one-worker gunicorn process is the intended setup.
+The on/off switch starts from COMEBACK_MODE (default on). The owner
+can flip that same global switch from the 1:1 private chat or from a
+group. A process restart drops the override and the display-name
+cache, then starts from the env default again. Render's one-worker
+gunicorn process is the intended setup.
 """
 
 import os
