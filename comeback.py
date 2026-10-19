@@ -28,6 +28,9 @@ TOGGLE_ON_TEXT = "吵架模式開"
 TOGGLE_OFF_TEXT = "吵架模式關"
 TOGGLE_ON_REPLY = "吵架模式開了。"
 TOGGLE_OFF_REPLY = "吵架模式關了。"
+STATUS_TEXT = "吵架模式狀態"
+STATUS_ON_REPLY = "吵架模式現在是開的。"
+STATUS_OFF_REPLY = "吵架模式現在是關的。"
 
 # Short game-banter. No slurs, no family profanity, no appearance,
 # disability, ethnicity, or sex, and no threats.
@@ -367,14 +370,21 @@ def is_ambiguous_insult(text):
     return any(cue in norm for cue in AMBIGUOUS_CUES)
 
 
-def parse_toggle(text):
+def _compact_command(text):
 
     if not isinstance(text, str):
-        return None
+        return ""
 
     compact = unicodedata.normalize("NFKC", text)
     compact = re.sub(r"\s+", "", compact)
     compact = re.sub(r"[。.!！?？~～]+$", "", compact)
+
+    return compact
+
+
+def parse_toggle(text):
+
+    compact = _compact_command(text)
 
     if compact == TOGGLE_ON_TEXT:
         return True
@@ -383,6 +393,11 @@ def parse_toggle(text):
         return False
 
     return None
+
+
+def is_status_command(text):
+
+    return _compact_command(text) == STATUS_TEXT
 
 
 def _env_enabled():
@@ -625,6 +640,18 @@ def handle_group_text(
 
         reply(TOGGLE_OFF_REPLY)
         return "toggle_off"
+
+    if is_status_command(stripped):
+
+        if not _toggle_allowed(user_id, owner_user_id):
+            return "status_ignored"
+
+        if comeback_enabled():
+            reply(STATUS_ON_REPLY)
+            return "status_on"
+
+        reply(STATUS_OFF_REPLY)
+        return "status_off"
 
     if not comeback_enabled():
         return "disabled"

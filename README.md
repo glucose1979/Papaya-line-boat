@@ -12,8 +12,9 @@ This bot already sets `OWNER_USER_ID`, so only that user can toggle the mode. Ty
 
 - `吵架模式開`
 - `吵架模式關`
+- `吵架模式狀態`
 
-A trailing `。` or `!` is ignored. Anyone else typing them is ignored. The bot replies in that same chat with `吵架模式開了。` or `吵架模式關了。` These two lines are not sent to the private-chat model and are not pushed to the group.
+A trailing `。` or `!` is ignored. Anyone else typing them is ignored. The bot replies in that same chat with `吵架模式開了。`, `吵架模式關了。`, `吵架模式現在是開的。`, or `吵架模式現在是關的。` The status line reports the current global switch and does not change it. These lines are not sent to the private-chat model and are not pushed to the group.
 
 The switch defaults to **on** after deploy. `吵架模式開` / `吵架模式關` override that until the process restarts. A restart or a new deploy clears the in-memory override and the name cache, then starts again from `COMEBACK_MODE` (on when that variable is unset). Keep gunicorn at one worker, the same constraint `/dl` already documents, so the override is the one the group sees.
 

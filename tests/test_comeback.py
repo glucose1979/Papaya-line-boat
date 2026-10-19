@@ -76,6 +76,7 @@ _NOT_INSULTS = (
     "我喜歡這個機器人",
     "吵架模式開",
     "吵架模式關",
+    "吵架模式狀態",
 )
 
 
@@ -225,6 +226,17 @@ class MatcherTests(unittest.TestCase):
         self.assertIsNone(comeback.parse_toggle("請吵架模式開"))
         self.assertIsNone(comeback.parse_toggle("大家好"))
         self.assertIsNone(comeback.parse_toggle(None))
+        self.assertIsNone(comeback.parse_toggle("吵架模式狀態"))
+
+    def test_status_command_matches_like_the_toggles(self):
+        self.assertTrue(comeback.is_status_command("吵架模式狀態"))
+        self.assertTrue(comeback.is_status_command("  吵架模式狀態。 "))
+        self.assertTrue(comeback.is_status_command("吵架 模式 狀態！"))
+        self.assertFalse(comeback.is_status_command("吵架模式開"))
+        self.assertFalse(comeback.is_status_command("吵架模式關"))
+        self.assertFalse(comeback.is_status_command("請吵架模式狀態"))
+        self.assertFalse(comeback.is_status_command("吵架模式狀態如何"))
+        self.assertFalse(comeback.is_status_command(None))
 
     def test_default_on_and_restart_returns_to_env(self):
         self.assertTrue(comeback.comeback_enabled())
@@ -505,6 +517,36 @@ class HandleTests(unittest.TestCase):
 
         comeback.reset_comeback_state()
         self.assertTrue(comeback.comeback_enabled())
+
+    def test_status_reports_the_real_switch_and_ignores_others(self):
+        self.names = {"Uhung": "Hung Chang Chen"}
+        self.classify_result = False
+
+        self.assertEqual(
+            self._handle("吵架模式狀態", "Uowner"),
+            "status_on",
+        )
+        self.assertEqual(self.replies, [comeback.STATUS_ON_REPLY])
+        self.assertEqual(self.lookups, [])
+        self.assertEqual(self.classified, [])
+        self.assertTrue(comeback.comeback_enabled())
+
+        self.assertEqual(self._handle("吵架模式關", "Uowner"), "toggle_off")
+        self.assertEqual(
+            self._handle("吵架模式狀態。", "Uowner"),
+            "status_off",
+        )
+        self.assertEqual(self.replies[-1], comeback.STATUS_OFF_REPLY)
+        self.assertFalse(comeback.comeback_enabled())
+        self.assertEqual(self.lookups, [])
+
+        before = len(self.replies)
+        self.assertEqual(
+            self._handle("吵架模式狀態", "Uother"),
+            "status_ignored",
+        )
+        self.assertEqual(len(self.replies), before)
+        self.assertFalse(comeback.comeback_enabled())
 
     def test_missing_owner_id_lets_anyone_toggle(self):
         self.names = {}
@@ -854,6 +896,72 @@ class WebhookTests(unittest.TestCase):
             comeback.COMEBACK_LINES,
         )
         self.assertEqual(len(self.gets), 1)
+
+    def test_status_replies_with_the_real_switch_and_skips_chat(self):
+        private = self._post_event(self._text_event("吵架模式狀態"))
+
+        self.assertEqual(private.status_code, 200)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(len(self.posts), 1)
+        self.assertEqual(
+            self.posts[0]["url"],
+            "https://api.line.me/v2/bot/message/reply",
+        )
+        self.assertNotIn("push", self.posts[0]["url"])
+        self.assertEqual(
+            self.posts[0]["json"]["replyToken"],
+            "reply-token",
+        )
+        self.assertEqual(
+            self.posts[0]["json"]["messages"][0]["text"],
+            "吵架模式現在是開的。",
+        )
+        self.assertEqual(app.load_chat_history("Uowner"), [])
+        self.assertTrue(comeback.comeback_enabled())
+
+        self._post_event(self._text_event("吵架模式關"))
+        group = self._post_event(
+            self._text_event(
+                "吵架模式狀態！",
+                user_id="Uowner",
+                source_type="group",
+            )
+        )
+
+        self.assertEqual(group.status_code, 200)
+        self.assertEqual(
+            self.posts[-1]["url"],
+            "https://api.line.me/v2/bot/message/reply",
+        )
+        self.assertEqual(
+            self.posts[-1]["json"]["messages"][0]["text"],
+            "吵架模式現在是關的。",
+        )
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.gets, [])
+        self.assertFalse(comeback.comeback_enabled())
+
+        before = len(self.posts)
+        stranger_group = self._post_event(
+            self._text_event(
+                "吵架模式狀態",
+                user_id="Uhung",
+                source_type="group",
+            )
+        )
+        stranger_private = self._post_event(
+            self._text_event(
+                "吵架模式狀態",
+                user_id="Uother",
+            )
+        )
+
+        self.assertEqual(stranger_group.status_code, 200)
+        self.assertEqual(stranger_private.status_code, 200)
+        self.assertEqual(len(self.posts), before)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.gets, [])
+        self.assertFalse(comeback.comeback_enabled())
 
     def test_profile_failure_still_returns_200(self):
         def broken_get(url, headers=None, timeout=None):
