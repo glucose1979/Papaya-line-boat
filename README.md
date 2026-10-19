@@ -2,6 +2,52 @@
 
 Line AI boat (木瓜姐).
 
+## Group comeback mode (吵架模式)
+
+In a group chat, when the sender’s LINE display name is `Hung Chang Chen` (case-insensitive; extra spaces ignored) and the message insults the bot, the AI, or its replies, the bot answers with **one** short comeback. The name is read from the [group member profile API](https://developers.line.biz/en/reference/messaging-api/#get-group-member-profile) and cached in memory for 12 hours. The reply uses the reply token, not push, so it does not spend the monthly push quota.
+
+Other group messages stay silent. Private chat, `請發送`, `/fix`, `/transcribe`, and `/dl` are unchanged.
+
+This bot already sets `OWNER_USER_ID`, so only that user can toggle the mode, by typing these in the group:
+
+- `吵架模式開`
+- `吵架模式關`
+
+A trailing `。` or `!` is ignored. Anyone else typing them is ignored. The bot replies `吵架模式開了。` or `吵架模式關了。`
+
+The switch defaults to **on** after deploy. `吵架模式開` / `吵架模式關` override that until the process restarts. A restart or a new deploy clears the in-memory override and the name cache, then starts again from `COMEBACK_MODE` (on when that variable is unset). Keep gunicorn at one worker, the same constraint `/dl` already documents, so the override is the one the group sees.
+
+| Variable | Required | Default | Meaning |
+| --- | --- | --- | --- |
+| `COMEBACK_MODE` | no | on | Unset, empty, `on`, `1`, or `true` starts enabled. `off`, `0`, `false`, `no`, or `關` starts disabled. |
+| `COMEBACK_CLASSIFY_MODEL` | no | `gpt-4o-mini` | Used only when that sender’s message looks disparaging but is not a keyword hit. `gpt-5-mini` is accepted. A failure or a `no` sends nothing. |
+
+No new secret. The profile call uses `LINE_CHANNEL_ACCESS_TOKEN`. Classification uses the existing `OPENAI_API_KEY`.
+
+Keyword hits (insult word next to AI／人工智慧／機器人／回覆／回复／木瓜姊／木瓜姐／木瓜妹, or the set phrase 人工智障) reply immediately. Examples: 垃圾AI, 垃圾回覆, 垃圾AI回覆, 廢物AI, 爛AI, AI很爛, 智障回覆, 垃圾機器人. Spaces and `AI` / `ai` / `ＡＩ` do not matter.
+
+Insult words: 垃圾, 廢物, 廢柴, 智障, 腦殘, 笨蛋, 白痴, 白癡, 低能, 沒用, 狗屁, 狗屎, 扯淡, 靠北, 三小, 有病, 機車, 爛, 廢, 蠢, 傻, 笨, 鳥, 糟, 遜, 菜, 雷, 差, 爛透, 爛透了. English, next to AI: garbage, trash, stupid, dumb, useless, lame, worst, shitty, bad, sucks.
+
+`垃圾分類` and `垃圾車` are not insults. A short leftover such as「這AI有點不行」is the only case sent to the classifier.
+
+Comeback lines:
+
+1. 垃圾回覆，專送垃圾人。
+2. 你丟什麼，我就回什麼。
+3. 嫌爛？這則就是你的份。
+4. 水準在這，回覆就在這。
+5. 垃圾進，垃圾出，公平。
+6. 這種話，只配這種回。
+7. 你開口，我就照單回。
+8. 專屬回覆，對準你這句。
+9. 罵得真勤，我回得更勤。
+10. 別嫌，這是你點的餐。
+11. 火氣歸你，回覆歸我。
+12. 你這句，值回這一則。
+13. 酸完了？回覆已送達。
+14. 對味了吧，專程回你。
+15. 回覆不貴，專配這句。
+
 ## Private AI proofreading (`POST /fix`)
 
 Used by the static dictation page at https://glucose1979.github.io/dictation/ .

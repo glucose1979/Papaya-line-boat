@@ -14,6 +14,7 @@ import requests
 from flask import Flask, request, abort, jsonify, make_response
 from openai import APITimeoutError, OpenAI
 
+import comeback
 import video_download
 
 
@@ -1813,6 +1814,82 @@ def health():
 
 
 # =========================================================
+# 群組吵架模式
+#
+# 只有群組、而且只有顯示名稱是 Hung Chang Chen 的人罵
+# 機器人／AI／回覆時，才用 reply token 回一句。不使用 push。
+# 其餘群組訊息維持安靜。私訊、請發送、/fix、/transcribe、/dl
+# 都不走這裡。
+# =========================================================
+
+def _handle_group_message(
+    message,
+    message_type,
+    reply_token,
+    source,
+    user_id,
+):
+
+    if message_type != "text":
+        return
+
+    if not reply_token:
+        return
+
+    group_id = source.get("groupId") or ""
+    user_text = message.get("text") or ""
+
+    def send_reply(text):
+
+        reply_line(reply_token, text)
+
+    def lookup_name(gid, uid):
+
+        return comeback.fetch_group_display_name(
+            gid,
+            uid,
+            requests.get,
+            LINE_CHANNEL_ACCESS_TOKEN,
+        )
+
+    def classify(text):
+
+        return comeback.classify_insult(client, text)
+
+    try:
+
+        result = comeback.handle_group_text(
+            user_text,
+            user_id,
+            group_id,
+            send_reply,
+            lookup_name,
+            classify,
+            owner_user_id=OWNER_USER_ID,
+        )
+
+    except Exception as e:
+
+        print(
+            "Group comeback error:",
+            repr(e)
+        )
+
+        return
+
+    if result == "comeback":
+
+        print("Group comeback sent")
+
+    elif result in ("toggle_on", "toggle_off"):
+
+        print(
+            "Comeback mode:",
+            result
+        )
+
+
+# =========================================================
 # LINE Webhook
 # =========================================================
 
@@ -1876,7 +1953,24 @@ def webhook():
 
 
         # =================================================
-        # 群組裡完全保持安靜
+        # 群組只處理吵架模式，其他群組訊息保持安靜
+        # =================================================
+
+        if source_type == "group":
+
+            _handle_group_message(
+                message,
+                message_type,
+                reply_token,
+                source,
+                user_id,
+            )
+
+            continue
+
+
+        # =================================================
+        # 私訊以外（聊天室等）保持安靜
         # =================================================
 
         if source_type != "user":
