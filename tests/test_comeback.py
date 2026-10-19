@@ -247,13 +247,21 @@ class MatcherTests(unittest.TestCase):
         os.environ["COMEBACK_MODE"] = "on"
         self.assertTrue(comeback.comeback_enabled())
 
-    def test_comeback_lines_are_short_unique_and_game_banter(self):
+    def test_comeback_lines_are_the_owner_list(self):
         lines = comeback.COMEBACK_LINES
-        self.assertGreaterEqual(len(lines), 15)
-        self.assertEqual(len(lines), len(set(lines)))
+        self.assertEqual(
+            lines,
+            (
+                "垃圾回覆，專送垃圾人。",
+                "你丟什麼，我就回什麼。",
+                "嫌爛？這則就是你的份。",
+                "水準在這，回覆就在這。",
+                "垃圾進，垃圾出，公平。",
+                "這種話，只配這種回。",
+            ),
+        )
         for line in lines:
             self.assertLessEqual(len(line), 20, line)
-            self.assertTrue(line.strip(), line)
             for word in _FORBIDDEN:
                 self.assertNotIn(word, line)
 
