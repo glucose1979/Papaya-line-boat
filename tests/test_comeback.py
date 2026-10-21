@@ -191,10 +191,41 @@ class MatcherTests(unittest.TestCase):
         ):
             self.assertFalse(comeback.is_ambiguous_insult(text), text)
 
-    def test_long_message_is_not_sent_to_the_classifier(self):
-        text = "這AI有點不行" + "喔" * 40
-        self.assertGreater(len(comeback.normalize_insult_text(text)), 40)
-        self.assertFalse(comeback.is_ambiguous_insult(text))
+    def test_classifier_accepts_any_text_up_to_300(self):
+        legacy = "這AI有點不行" + "喔" * 40
+        self.assertGreater(
+            len(comeback.normalize_insult_text(legacy)),
+            40,
+        )
+        self.assertFalse(comeback.is_ambiguous_insult(legacy))
+        self.assertTrue(comeback.should_classify(legacy))
+        self.assertTrue(comeback.should_classify("問了也是白問"))
+        self.assertTrue(comeback.should_classify("大家好"))
+        self.assertTrue(comeback.should_classify("喔" * 300))
+        self.assertFalse(comeback.should_classify("喔" * 301))
+        self.assertFalse(comeback.should_classify("垃圾AI"))
+        self.assertFalse(comeback.should_classify("  "))
+        self.assertFalse(comeback.should_classify(None))
+        long_hit = "垃圾AI" + ("喔" * 400)
+        self.assertTrue(comeback.is_insult(long_hit))
+        self.assertFalse(comeback.should_classify(long_hit))
+
+    def test_classify_instructions_list_meaning_examples(self):
+        for phrase in (
+            "垃圾AI",
+            "垃圾垃圾回覆",
+            "木瓜姊好爛",
+            "機器人真的很蠢",
+            "AI的回答有夠廢",
+            "這台機器人在亂講",
+            "回得什麼鬼",
+            "人工智障",
+            "問了也是白問",
+        ):
+            self.assertIn(phrase, comeback.CLASSIFY_INSTRUCTIONS)
+        self.assertIn("回覆訊息", comeback.CLASSIFY_INSTRUCTIONS)
+        self.assertIn("垃圾分類", comeback.CLASSIFY_INSTRUCTIONS)
+        self.assertIn("垃圾車", comeback.CLASSIFY_INSTRUCTIONS)
 
     def test_display_name_ignores_case_and_extra_spaces(self):
         for name in (
@@ -430,6 +461,20 @@ class MatcherTests(unittest.TestCase):
             {"effort": "minimal"},
         )
 
+        long_text = "問" * 400
+        comeback.classify_insult(
+            Client(Response("no")),
+            long_text,
+            quoted=True,
+        )
+        self.assertTrue(
+            seen["kwargs"]["input"].startswith("（這則是回覆訊息）\n")
+        )
+        self.assertEqual(
+            seen["kwargs"]["input"].split("\n", 1)[1],
+            "問" * comeback.CLASSIFY_MAX_CHARS,
+        )
+
 
 class HandleTests(unittest.TestCase):
 
@@ -439,6 +484,7 @@ class HandleTests(unittest.TestCase):
         self.replies = []
         self.lookups = []
         self.classified = []
+        self.quoted_flags = []
 
     def tearDown(self):
         os.environ.pop("COMEBACK_MODE", None)
@@ -448,11 +494,12 @@ class HandleTests(unittest.TestCase):
         self.lookups.append((group_id, user_id))
         return self.names.get(user_id, "")
 
-    def _classify(self, text):
+    def _classify(self, text, quoted=False):
         self.classified.append(text)
+        self.quoted_flags.append(bool(quoted))
         return self.classify_result
 
-    def _handle(self, text, user_id="Uhung", owner="Uowner"):
+    def _handle(self, text, user_id="Uhung", owner="Uowner", quoted=False):
         return comeback.handle_group_text(
             text,
             user_id,
@@ -461,6 +508,7 @@ class HandleTests(unittest.TestCase):
             self._lookup,
             self._classify,
             owner,
+            quoted=quoted,
         )
 
     def test_strong_insult_from_target_replies_once(self):
@@ -488,11 +536,11 @@ class HandleTests(unittest.TestCase):
         self.names = {"Uother": "Someone Else"}
         self.classify_result = True
 
-        self.assertEqual(self._handle("大家好", "Uother"), "ignore")
+        self.assertEqual(self._handle("大家好", "Uother"), "not_target")
         self.assertEqual(self._handle("垃圾AI", "Uother"), "not_target")
         self.assertEqual(self.replies, [])
         self.assertEqual(self.classified, [])
-        self.assertEqual(len(self.lookups), 1)
+        self.assertEqual(len(self.lookups), 2)
 
     def test_ambiguous_classifies_only_after_the_name_matches(self):
         self.names = {
@@ -520,6 +568,66 @@ class HandleTests(unittest.TestCase):
             "comeback",
         )
         self.assertEqual(len(self.replies), 1)
+
+    def test_target_meaning_is_classified_and_others_are_not(self):
+        self.names = {
+            "Uhung": "Hung Chang Chen",
+            "Uother": "Someone Else",
+        }
+        self.classify_result = True
+
+        self.assertEqual(self._handle("問了也是白問"), "comeback")
+        self.assertEqual(self.classified, ["問了也是白問"])
+        self.assertEqual(self.quoted_flags, [False])
+        self.assertTrue(
+            self.replies[0].startswith(comeback.COMEBACK_PREFIX)
+        )
+
+        self.assertEqual(
+            self._handle("問了也是白問", "Uother"),
+            "not_target",
+        )
+        self.assertEqual(self.classified, ["問了也是白問"])
+
+        self.classify_result = False
+        self.assertEqual(self._handle("回得什麼鬼"), "not_insult")
+        self.assertEqual(self.replies, [self.replies[0]])
+
+    def test_over_cap_skips_lookup_and_classifier(self):
+        self.names = {"Uhung": "Hung Chang Chen"}
+        self.classify_result = True
+
+        self.assertEqual(self._handle("問" * 301), "ignore")
+        self.assertEqual(self.lookups, [])
+        self.assertEqual(self.classified, [])
+        self.assertEqual(self.replies, [])
+
+        self.assertEqual(
+            self._handle("垃圾AI" + ("喔" * 400)),
+            "comeback",
+        )
+        self.assertEqual(self.classified, [])
+        self.assertEqual(len(self.replies), 1)
+
+    def test_quoted_dismissive_is_marked_for_the_classifier(self):
+        self.names = {"Uhung": "Hung Chang Chen"}
+        self.classify_result = True
+
+        self.assertEqual(
+            self._handle("好爛", quoted=True),
+            "comeback",
+        )
+        self.assertEqual(self.classified, ["好爛"])
+        self.assertEqual(self.quoted_flags, [True])
+
+    def test_disabled_plain_text_does_not_look_up(self):
+        self.names = {"Uhung": "Hung Chang Chen"}
+        self.classify_result = True
+
+        self.assertEqual(self._handle("吵架模式關", "Uowner"), "toggle_off")
+        self.assertEqual(self._handle("問了也是白問"), "disabled")
+        self.assertEqual(self.lookups, [])
+        self.assertEqual(self.classified, [])
 
     def test_owner_toggles_and_restart_uses_env_again(self):
         self.names = {"Uhung": "Hung Chang Chen"}
@@ -810,7 +918,7 @@ class WebhookTests(unittest.TestCase):
         self.assertEqual(send.status_code, 200)
         self.assertEqual(self.posts, [])
         self.assertEqual(self.calls, [])
-        self.assertEqual(len(self.gets), 1)
+        self.assertEqual(len(self.gets), 2)
 
     def test_owner_toggle_and_private_chat_still_chat(self):
         off = self._post_event(
@@ -1018,6 +1126,46 @@ class WebhookTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.posts, [])
         self.assertEqual(self.calls, [])
+
+    def test_meaning_insult_is_classified_only_for_the_target(self):
+        self._scripted.append(FakeChatResponse("yes"))
+        event = self._text_event(
+            "問了也是白問",
+            user_id="Uhung",
+            source_type="group",
+        )
+        event["message"]["quotedMessageId"] = "quoted-1"
+
+        response = self._post_event(event)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(self.calls), 1)
+        self.assertIn("問了也是白問", self.calls[0]["instructions"])
+        self.assertTrue(
+            self.calls[0]["input"].startswith("（這則是回覆訊息）\n")
+        )
+        self.assertIn("問了也是白問", self.calls[0]["input"])
+        self.assertEqual(len(self.posts), 1)
+        sent = self.posts[0]["json"]["messages"][0]["text"]
+        self.assertTrue(sent.startswith(comeback.COMEBACK_PREFIX))
+        self.assertIn(
+            sent[len(comeback.COMEBACK_PREFIX):],
+            comeback.COMEBACK_LINES,
+        )
+
+        before_calls = len(self.calls)
+        other = self._text_event(
+            "問了也是白問",
+            user_id="Uother",
+            source_type="group",
+        )
+        other["message"]["quotedMessageId"] = "quoted-2"
+        self.names["Uother"] = "Other Person"
+        quiet = self._post_event(other)
+
+        self.assertEqual(quiet.status_code, 200)
+        self.assertEqual(len(self.calls), before_calls)
+        self.assertEqual(len(self.posts), 1)
 
 
 if __name__ == "__main__":

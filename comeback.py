@@ -1,8 +1,11 @@
 """Group-chat comeback mode for the LINE bot.
 
 In a group, a message from the display name "Hung Chang Chen" that
-insults the bot, the AI, or its replies gets one short reply. The
-reply uses the webhook reply token. Push is never used.
+insults the bot, the AI, or its replies gets one short reply. Keyword
+hits reply immediately. Any other non-empty text from that sender, up
+to CLASSIFY_MAX_CHARS, is classified by meaning. Other senders are
+never classified. The reply uses the webhook reply token. Push is
+never used.
 
 The on/off switch starts from COMEBACK_MODE (default on). The owner
 can flip that same global switch from the 1:1 private chat or from a
@@ -23,6 +26,7 @@ TARGET_DISPLAY_NAME = "hung chang chen"
 DISPLAY_NAME_TTL_SECONDS = 12 * 60 * 60
 CLASSIFY_MODEL_DEFAULT = "gpt-4o-mini"
 CLASSIFY_TIMEOUT_SECONDS = 8
+CLASSIFY_MAX_CHARS = 300
 
 TOGGLE_ON_TEXT = "吵架模式開"
 TOGGLE_OFF_TEXT = "吵架模式關"
@@ -131,8 +135,8 @@ ENGLISH_INSULTS = (
     "bad",
 )
 
-# Soft phrasing that is not a keyword hit. Classified only after the
-# display name matches, and only for a short message.
+# Older soft cues. The handler no longer requires one of these
+# before calling the classifier.
 AMBIGUOUS_CUES = (
     "不行",
     "不太好",
@@ -238,11 +242,19 @@ _OFF_VALUES = {
 }
 
 CLASSIFY_INSTRUCTIONS = (
-    "判斷這則群組訊息是不是在侮辱、貶低或嘲諷"
-    "「AI、人工智慧、機器人，或這隻機器人的回覆」。\n"
+    "判斷這則群組訊息的意思是不是在侮辱、嘲諷、貶低或看不起"
+    "這隻機器人（木瓜姊／木瓜姐）、AI、人工智慧、機器人，或它的回覆。\n"
+    "同義詞、俚語、諷刺、諧諷、簡體、中英夾雜都算。"
     "是的話只回答 yes，否則只回答 no。不要解釋。\n"
-    "稱讚、提問、閒聊、討論別的主題、垃圾分類或垃圾車、"
-    "以及沒有針對 AI／機器人／回覆的話，回答 no。\n"
+    "下面這種意思要回答 yes："
+    "垃圾AI、垃圾垃圾回覆、木瓜姊好爛、機器人真的很蠢、"
+    "AI的回答有夠廢、這台機器人在亂講、回得什麼鬼、人工智障、問了也是白問。\n"
+    "若訊息開頭標了「（這則是回覆訊息）」，代表這則是直接回這隻機器人。"
+    "這種情況下，很短的不屑、嘲弄或否定也要回答 yes，"
+    "例如：呵呵、好爛、廢物、亂講、無言、白問。\n"
+    "沒有那個標記時，短句如果看不出是在罵這隻機器人、AI、機器人或回覆，回答 no。\n"
+    "稱讚、提問、閒聊、討論別的主題、垃圾分類、垃圾車，"
+    "以及沒有針對這隻機器人／AI／機器人／回覆的話，回答 no。\n"
     "不確定就回答 no。"
 )
 
@@ -353,6 +365,22 @@ def is_insult(text):
         return False
 
     return _STRONG.search(norm) is not None
+
+
+def should_classify(text):
+
+    if is_insult(text):
+        return False
+
+    if not isinstance(text, str):
+        return False
+
+    stripped = text.strip()
+
+    if not stripped or len(stripped) > CLASSIFY_MAX_CHARS:
+        return False
+
+    return True
 
 
 def is_ambiguous_insult(text):
@@ -575,13 +603,18 @@ def _answer_is_yes(answer):
     return compact in {"是", "yes", "y"}
 
 
-def classify_insult(openai_client, text):
+def classify_insult(openai_client, text, quoted=False):
+
+    body = (text or "")[:CLASSIFY_MAX_CHARS]
+
+    if quoted:
+        body = "（這則是回覆訊息）\n" + body
 
     model = _classify_model()
     kwargs = {
         "model": model,
         "instructions": CLASSIFY_INSTRUCTIONS,
-        "input": (text or "")[:500],
+        "input": body,
         "max_output_tokens": 32,
         "timeout": CLASSIFY_TIMEOUT_SECONDS,
     }
@@ -624,6 +657,7 @@ def handle_group_text(
     get_display_name,
     classify,
     owner_user_id,
+    quoted=False,
 ):
 
     if not isinstance(text, str):
@@ -667,7 +701,7 @@ def handle_group_text(
 
     strong = is_insult(stripped)
 
-    if not strong and not is_ambiguous_insult(stripped):
+    if not strong and not should_classify(stripped):
         return "ignore"
 
     try:
@@ -690,7 +724,9 @@ def handle_group_text(
 
         try:
 
-            insulting = bool(classify(stripped))
+            insulting = bool(
+                classify(stripped, quoted=bool(quoted))
+            )
 
         except Exception as exc:
 
