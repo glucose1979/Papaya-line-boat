@@ -436,18 +436,23 @@ class WebhookTests(unittest.TestCase):
 
     def setUp(self):
         app.clear_chat_memory()
+        app.comeback.reset_comeback_state()
         self.calls = []
         self.http_calls = []
         self._original_create = app.client.responses.create
         self._original_post = app.requests.post
+        self._original_get = app.requests.get
         app.client.responses.create = self._create
         app.requests.post = self._post
+        app.requests.get = self._get
         self._scripted = []
         self.client = app.app.test_client()
 
     def tearDown(self):
         app.client.responses.create = self._original_create
         app.requests.post = self._original_post
+        app.requests.get = self._original_get
+        app.comeback.reset_comeback_state()
         app.clear_chat_memory()
 
     def _create(self, **kwargs):
@@ -465,6 +470,18 @@ class WebhookTests(unittest.TestCase):
             "json": json
         })
         return FakeHttpResponse()
+
+    def _get(self, url, headers=None, timeout=None):
+
+        class ProfileResponse:
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"displayName": "Other Person"}
+
+        return ProfileResponse()
 
     def _sign(self, body):
         digest = hmac.new(

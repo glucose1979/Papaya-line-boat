@@ -21,7 +21,7 @@ The switch defaults to **on** after deploy. `吵架模式開` / `吵架模式關
 | Variable | Required | Default | Meaning |
 | --- | --- | --- | --- |
 | `COMEBACK_MODE` | no | on | Unset, empty, `on`, `1`, or `true` starts enabled. `off`, `0`, `false`, `no`, or `關` starts disabled. |
-| `COMEBACK_CLASSIFY_MODEL` | no | `gpt-4o-mini` | Used only when that sender’s message looks disparaging but is not a keyword hit. `gpt-5-mini` is accepted. A failure or a `no` sends nothing. |
+| `COMEBACK_CLASSIFY_MODEL` | no | `gpt-4o-mini` | Used only for Hung Chang Chen, and only when the message is not a keyword hit and is at most 300 characters. Other senders are never classified. `gpt-5-mini` is accepted. A failure or a `no` sends nothing. |
 
 No new secret. The profile call uses `LINE_CHANNEL_ACCESS_TOKEN`. Classification uses the existing `OPENAI_API_KEY`.
 
@@ -29,7 +29,9 @@ Keyword hits (insult word next to AI／人工智慧／機器人／回覆／回�
 
 Insult words: 垃圾, 廢物, 廢柴, 智障, 腦殘, 笨蛋, 白痴, 白癡, 低能, 沒用, 狗屁, 狗屎, 扯淡, 靠北, 三小, 有病, 機車, 爛, 廢, 蠢, 傻, 笨, 鳥, 糟, 遜, 菜, 雷, 差, 爛透, 爛透了. English, next to AI: garbage, trash, stupid, dumb, useless, lame, worst, shitty, bad, sucks.
 
-`垃圾分類` and `垃圾車` are not insults. A short leftover such as「這AI有點不行」is the only case sent to the classifier.
+A keyword hit of any length replies immediately and is not sent to the model. Every other non-empty message from Hung Chang Chen, up to 300 characters, is sent to the classifier. That includes synonyms, slang, sarcasm, simplified Chinese, mixed English, and a short dismissive message sent as a reply to the bot. No target word is required. Other senders are never classified. The name lookup still runs for those other short messages so the bot can tell who they are, then the result is cached for 12 hours.
+
+`垃圾分類` and `垃圾車`, praise, questions, and other topics are instructions to answer no. Uncertain answers no. A message longer than 300 characters is ignored unless it already matches a keyword. Examples the classifier is told to treat as yes: 垃圾AI, 垃圾垃圾回覆, 木瓜姊好爛, 機器人真的很蠢, AI的回答有夠廢, 這台機器人在亂講, 回得什麼鬼, 人工智障, 問了也是白問.
 
 Comeback lines:
 
