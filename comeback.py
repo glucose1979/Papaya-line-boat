@@ -7,6 +7,10 @@ to CLASSIFY_MAX_CHARS, is classified by meaning. Other senders are
 never classified. The reply uses the webhook reply token. Push is
 never used.
 
+The group named 自動回覆訓練區 is the exception: any sender counts,
+and the reply prefix uses that sender's display name. The group name
+comes from LINE Get group summary and is cached per group id.
+
 The on/off switch starts from COMEBACK_MODE (default on). The owner
 can flip that same global switch from the 1:1 private chat or from a
 group. A process restart drops the override and the display-name
@@ -36,6 +40,7 @@ STATUS_TEXT = "吵架模式狀態"
 STATUS_ON_REPLY = "吵架模式現在是開的。"
 STATUS_OFF_REPLY = "吵架模式現在是關的。"
 COMEBACK_PREFIX = "敬告 Hung Chang Chen："
+TRAINING_GROUP_NAME = "自動回覆訓練區"
 
 # Short game-banter. No slurs, no family profanity, no appearance,
 # disability, ethnicity, or sex, and no threats.
@@ -316,6 +321,9 @@ _state_lock = threading.Lock()
 _names = {}
 _name_lock = threading.Lock()
 
+_group_names = {}
+_group_lock = threading.Lock()
+
 
 def normalize_display_name(name):
 
@@ -473,6 +481,7 @@ def reset_comeback_state():
         _enabled_override = None
 
     clear_display_name_cache()
+    clear_group_name_cache()
 
 
 def pick_comeback(rng=None):
@@ -485,6 +494,14 @@ def pick_comeback(rng=None):
 def format_group_comeback(line):
 
     return COMEBACK_PREFIX + line
+
+
+def format_training_comeback(line, display_name):
+
+    if not isinstance(display_name, str):
+        display_name = ""
+
+    return "敬告 " + display_name + "：" + line
 
 
 def get_cached_display_name(user_id, now=None):
@@ -528,6 +545,108 @@ def clear_display_name_cache():
 
     with _name_lock:
         _names.clear()
+
+
+def get_cached_group_name(group_id, now=None):
+
+    if not group_id:
+        return None
+
+    now = time.time() if now is None else now
+
+    with _group_lock:
+
+        entry = _group_names.get(group_id)
+
+        if entry is None:
+            return None
+
+        cached_at, name = entry
+
+        if now - cached_at > DISPLAY_NAME_TTL_SECONDS:
+            _group_names.pop(group_id, None)
+            return None
+
+        return name
+
+
+def cache_group_name(group_id, name, now=None):
+
+    if not group_id:
+        return
+
+    now = time.time() if now is None else now
+
+    if not isinstance(name, str):
+        name = ""
+
+    with _group_lock:
+        _group_names[group_id] = (now, name)
+
+
+def clear_group_name_cache():
+
+    with _group_lock:
+        _group_names.clear()
+
+
+class GroupSummary:
+
+    def __init__(self, group_id, group_name):
+
+        self.groupId = group_id
+        self.groupName = group_name
+
+
+def get_group_summary(group_id, http_get, token, now=None):
+
+    if not group_id:
+        return GroupSummary("", "")
+
+    cached = get_cached_group_name(group_id, now=now)
+
+    if cached is not None:
+        return GroupSummary(group_id, cached)
+
+    url = (
+        "https://api.line.me/v2/bot/group/"
+        f"{group_id}/summary"
+    )
+
+    response = http_get(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}"
+        },
+        timeout=5,
+    )
+
+    response.raise_for_status()
+
+    payload = response.json()
+    name = ""
+    summary_id = group_id
+
+    if isinstance(payload, dict):
+
+        raw_name = payload.get("groupName")
+
+        if isinstance(raw_name, str):
+            name = raw_name
+
+        raw_id = payload.get("groupId")
+
+        if isinstance(raw_id, str) and raw_id:
+            summary_id = raw_id
+
+    cache_group_name(group_id, name, now=now)
+
+    return GroupSummary(summary_id, name)
+
+
+def is_training_group(group_name):
+
+    return group_name == TRAINING_GROUP_NAME
 
 
 def fetch_group_display_name(
@@ -658,6 +777,7 @@ def handle_group_text(
     classify,
     owner_user_id,
     quoted=False,
+    training=False,
 ):
 
     if not isinstance(text, str):
@@ -717,7 +837,7 @@ def handle_group_text(
 
         return "lookup_error"
 
-    if not is_target_sender(name):
+    if not training and not is_target_sender(name):
         return "not_target"
 
     if not strong:
@@ -740,6 +860,11 @@ def handle_group_text(
         if not insulting:
             return "not_insult"
 
-    reply(format_group_comeback(pick_comeback()))
+    line = pick_comeback()
+
+    if training:
+        reply(format_training_comeback(line, name))
+    else:
+        reply(format_group_comeback(line))
 
     return "comeback"

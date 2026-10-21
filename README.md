@@ -21,7 +21,7 @@ The switch defaults to **on** after deploy. `吵架模式開` / `吵架模式關
 | Variable | Required | Default | Meaning |
 | --- | --- | --- | --- |
 | `COMEBACK_MODE` | no | on | Unset, empty, `on`, `1`, or `true` starts enabled. `off`, `0`, `false`, `no`, or `關` starts disabled. |
-| `COMEBACK_CLASSIFY_MODEL` | no | `gpt-4o-mini` | Used only for Hung Chang Chen, and only when the message is not a keyword hit and is at most 300 characters. Other senders are never classified. `gpt-5-mini` is accepted. A failure or a `no` sends nothing. |
+| `COMEBACK_CLASSIFY_MODEL` | no | `gpt-4o-mini` | Used only for a matched sender, and only when the message is not a keyword hit and is at most 300 characters. That sender is Hung Chang Chen in every group, or anyone in `自動回覆訓練區`. Other senders in other groups are never classified. `gpt-5-mini` is accepted. A failure or a `no` sends nothing. |
 
 No new secret. The profile call uses `LINE_CHANNEL_ACCESS_TOKEN`. Classification uses the existing `OPENAI_API_KEY`.
 
@@ -46,6 +46,10 @@ Comeback lines:
 9. 罵得這麼用力，可惜沒半個人在聽。
 
 The group reply is the line with `敬告 Hung Chang Chen：` in front. Toggle and status replies are not prefixed.
+
+The group named `自動回覆訓練區` is a practice room. The bot reads the name with LINE Get group summary (`GET /v2/bot/group/{groupId}/summary`, field `groupName`) and caches it per group id for 12 hours, the same lifetime as display names. A failed lookup is not cached and is treated as an ordinary group. In that named group only, any sender counts, including the owner and any other display name, and the prefix uses that sender’s display name with the same full-width colon, for example `敬告 侯鎮邦：`. Every other group still requires Hung Chang Chen and still uses exactly `敬告 Hung Chang Chen：`.
+
+Each group message is logged at INFO as `groupId` and `groupName`. The message text is not logged.
 
 ## Private AI proofreading (`POST /fix`)
 

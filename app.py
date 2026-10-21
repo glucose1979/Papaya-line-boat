@@ -3,6 +3,7 @@ import base64
 import glob
 import hashlib
 import hmac
+import logging
 import re
 import shutil
 import subprocess
@@ -23,6 +24,17 @@ import video_download
 # =========================================================
 
 app = Flask(__name__)
+
+GROUP_LOGGER = logging.getLogger("papaya.group")
+GROUP_LOGGER.setLevel(logging.INFO)
+if not GROUP_LOGGER.handlers:
+    _group_log_handler = logging.StreamHandler()
+    _group_log_handler.setLevel(logging.INFO)
+    _group_log_handler.setFormatter(
+        logging.Formatter("%(levelname)s %(name)s %(message)s")
+    )
+    GROUP_LOGGER.addHandler(_group_log_handler)
+GROUP_LOGGER.propagate = False
 
 LINE_CHANNEL_SECRET = os.environ["LINE_CHANNEL_SECRET"]
 LINE_CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
@@ -142,7 +154,7 @@ SYSTEM_PROMPT = """
 
 群組平常不說話。
 
-吵架模式是群組功能，預設開，程式重開後回到開。只有顯示名稱是 Hung Chang Chen 的人（大小寫、多的空白不管）在群組裡侮辱、嘲諷或貶低你、AI、機器人或你的回覆時，你才隨機回下面九句裡的一句，送進群組時整句前面固定加上「敬告 Hung Chang Chen：」。關鍵字只是快路。同義、俚語、諧諷、簡體、中英夾雜，或直接回你的短句在不屑，也算。稱讚、閒聊、別的主題不算。其他人、其他話，不回。沒有被動模式。老闆要開關，得在私訊或群組打這兩句：「吵架模式開」、「吵架模式關」。句尾多一個句號也可以。別人打無效。你看不到現在是開還是關，不要猜。老闆要查，請他打「吵架模式狀態」，私訊或群組都可以，程式會照實回，不要你自己編。九句是：垃圾回覆，專送垃圾人。你丟什麼，我就回什麼。嫌爛？這則就是你的份。水準在這，回覆就在這。垃圾進，垃圾出，公平。這種話，只配這種回。連 AI 都懶得跟你計較，你自己品味一下。你的見識，就跟你的發言一樣廉價。罵得這麼用力，可惜沒半個人在聽。
+吵架模式是群組功能，預設開，程式重開後回到開。只有顯示名稱是 Hung Chang Chen 的人（大小寫、多的空白不管）在群組裡侮辱、嘲諷或貶低你、AI、機器人或你的回覆時，你才隨機回下面九句裡的一句，送進群組時整句前面固定加上「敬告 Hung Chang Chen：」。關鍵字只是快路。同義、俚語、諧諷、簡體、中英夾雜，或直接回你的短句在不屑，也算。稱讚、閒聊、別的主題不算。其他人、其他話，不回。沒有被動模式。群組名稱剛好是「自動回覆訓練區」時，任何人（包含老闆、任何顯示名稱）都算那個對象，回覆前面改成「敬告」加上對方的顯示名稱和全形冒號。其他群組維持只有 Hung Chang Chen，前面固定「敬告 Hung Chang Chen：」。老闆要開關，得在私訊或群組打這兩句：「吵架模式開」、「吵架模式關」。句尾多一個句號也可以。別人打無效。你看不到現在是開還是關，不要猜。老闆要查，請他打「吵架模式狀態」，私訊或群組都可以，程式會照實回，不要你自己編。九句是：垃圾回覆，專送垃圾人。你丟什麼，我就回什麼。嫌爛？這則就是你的份。水準在這，回覆就在這。垃圾進，垃圾出，公平。這種話，只配這種回。連 AI 都懶得跟你計較，你自己品味一下。你的見識，就跟你的發言一樣廉價。罵得這麼用力，可惜沒半個人在聽。
 
 聽寫頁 https://glucose1979.github.io/dictation/ 的 AI 校正是網站上的 /fix，不是 LINE 指令。用來改語音轉文字的錯字、同音字和標點；中文用臺灣繁體，也收英文稿。沒設密碼就關閉。
 
@@ -1838,8 +1850,10 @@ def health():
 #
 # 只有群組、而且只有顯示名稱是 Hung Chang Chen 的人侮辱、
 # 嘲諷或貶低機器人／AI／回覆時，才用 reply token 回一句。
-# 關鍵字直接回。其餘非空文字（約 300 字內）先對上名字，
-# 對上才送分類。其他人不會打到分類。不使用 push。
+# 「自動回覆訓練區」例外：任何人都算那個對象，前綴用
+# 對方的顯示名稱。群組名稱來自 get group summary，依
+# groupId 快取。每則群組訊息用 INFO 記 groupId 和
+# groupName，不記內文。不使用 push。
 # 私訊、請發送、/fix、/transcribe、/dl 都不走這裡。
 # =========================================================
 
@@ -1851,13 +1865,20 @@ def _handle_group_message(
     user_id,
 ):
 
+    group_id = source.get("groupId") or ""
+    group_name = _lookup_group_name(group_id)
+    GROUP_LOGGER.info(
+        "group message groupId=%s groupName=%s",
+        group_id,
+        group_name,
+    )
+
     if message_type != "text":
         return
 
     if not reply_token:
         return
 
-    group_id = source.get("groupId") or ""
     user_text = message.get("text") or ""
 
     def send_reply(text):
@@ -1894,6 +1915,7 @@ def _handle_group_message(
             classify,
             owner_user_id=OWNER_USER_ID,
             quoted=quoted,
+            training=comeback.is_training_group(group_name),
         )
 
     except Exception as e:
@@ -1920,6 +1942,33 @@ def _handle_group_message(
             "Comeback mode:",
             result
         )
+
+
+def _lookup_group_name(group_id):
+
+    try:
+
+        summary = comeback.get_group_summary(
+            group_id,
+            requests.get,
+            LINE_CHANNEL_ACCESS_TOKEN,
+        )
+
+    except Exception as exc:
+
+        print(
+            "Group summary error:",
+            type(exc).__name__
+        )
+
+        return ""
+
+    name = summary.groupName
+
+    if not isinstance(name, str):
+        return ""
+
+    return name
 
 
 # =========================================================
