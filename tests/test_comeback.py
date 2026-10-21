@@ -165,6 +165,51 @@ class MatcherTests(unittest.TestCase):
         for text in _NOT_INSULTS:
             self.assertFalse(comeback.is_insult(text), text)
 
+    def test_profanity_matches_phrases_spaces_and_homophones(self):
+        for text in (
+            "操你媽",
+            "幹你娘",
+            "幹你老師",
+            "幹",
+            "靠北",
+            "靠杯",
+            "添你娘",
+            "X你娘",
+            "x你娘",
+            "操 你 媽",
+            "操-你-媽",
+            "操*你*媽",
+            "草你媽",
+            "淦你娘",
+            "干你老師",
+            "乾你娘",
+            "舔你娘",
+            "靠背",
+            "幹你",
+            "操你全家",
+            "幹！",
+            "ｃｎｍ",
+            "×你娘",
+            "*你娘",
+            "這群人幹",
+        ):
+            self.assertTrue(comeback.is_profanity(text), text)
+
+        for text in (
+            "大家好",
+            "垃圾AI",
+            "幹部來了",
+            "幹嘛",
+            "幹什麼",
+            "樹幹",
+            "若干人",
+            "你好",
+            "你娘",
+            None,
+            "",
+        ):
+            self.assertFalse(comeback.is_profanity(text), repr(text))
+
     def test_non_text_is_not_an_insult(self):
         self.assertFalse(comeback.is_insult(None))
         self.assertFalse(comeback.is_insult(""))
@@ -608,6 +653,7 @@ class HandleTests(unittest.TestCase):
         owner="Uowner",
         quoted=False,
         training=False,
+        generate=None,
     ):
         return comeback.handle_group_text(
             text,
@@ -619,6 +665,7 @@ class HandleTests(unittest.TestCase):
             owner,
             quoted=quoted,
             training=training,
+            generate=generate,
         )
 
     def test_strong_insult_from_target_replies_once(self):
@@ -845,6 +892,156 @@ class HandleTests(unittest.TestCase):
         self.assertEqual(self.replies, [comeback.TOGGLE_OFF_REPLY])
         self.assertFalse(comeback.comeback_enabled())
 
+    def test_generated_line_keeps_the_prefix_rules(self):
+        self.names = {
+            "Uhung": "Hung Chang Chen",
+            "Uowner": "侯鎮邦",
+            "Uother": "Someone Else",
+        }
+        self.classify_result = False
+        seen = []
+
+        def generate(text, quoted=False):
+            seen.append((text, quoted))
+            return "就這水準？"
+
+        result = self._handle("垃圾AI", generate=generate)
+
+        self.assertEqual(result, "comeback")
+        self.assertEqual(seen, [("垃圾AI", False)])
+        self.assertEqual(
+            self.replies[0],
+            comeback.COMEBACK_PREFIX + "就這水準？",
+        )
+        self.assertLessEqual(len("就這水準？"), 10)
+        self.assertNotIn("就這水準？", comeback.COMEBACK_LINES)
+
+        self.assertEqual(
+            self._handle(
+                "垃圾AI",
+                "Uowner",
+                training=True,
+                generate=generate,
+            ),
+            "comeback",
+        )
+        self.assertEqual(
+            self.replies[-1],
+            "敬告 侯鎮邦：就這水準？",
+        )
+
+        before = len(seen)
+        self.assertEqual(
+            self._handle("垃圾AI", "Uother", generate=generate),
+            "not_target",
+        )
+        self.assertEqual(len(seen), before)
+        self.assertEqual(
+            self._handle("吵架模式狀態", "Uowner", generate=generate),
+            "status_on",
+        )
+        self.assertEqual(len(seen), before)
+
+    def test_profanity_uses_the_fixed_body_and_skips_the_model(self):
+        self.names = {
+            "Uhung": "Hung Chang Chen",
+            "Uowner": "侯鎮邦",
+            "Uother": "Someone Else",
+        }
+        self.classify_result = True
+        seen = []
+
+        def generate(text, quoted=False):
+            seen.append(text)
+            return "就這水準？"
+
+        result = self._handle("操你媽", generate=generate)
+
+        self.assertEqual(result, "profanity")
+        self.assertEqual(seen, [])
+        self.assertEqual(self.classified, [])
+        self.assertEqual(
+            self.replies[0],
+            comeback.COMEBACK_PREFIX + "你自己操自己",
+        )
+
+        self.assertEqual(
+            self._handle("幹你娘", "Uowner", training=True, generate=generate),
+            "profanity",
+        )
+        self.assertEqual(
+            self.replies[-1],
+            "敬告 侯鎮邦：你自己操自己",
+        )
+        self.assertEqual(seen, [])
+
+        self.assertEqual(
+            self._handle("靠北", "Uother", generate=generate),
+            "not_target",
+        )
+        self.assertEqual(seen, [])
+        self.assertEqual(self.replies, self.replies[:2])
+
+        self.assertEqual(
+            self._handle("幹" + ("喔" * 400), generate=generate),
+            "profanity",
+        )
+        self.assertEqual(seen, [])
+
+        self.replies.clear()
+        self.assertEqual(
+            self._handle("吵架模式關", "Uowner"),
+            "toggle_off",
+        )
+        lookups_before = len(self.lookups)
+        self.assertEqual(self._handle("幹", generate=generate), "disabled")
+        self.assertEqual(len(self.lookups), lookups_before)
+        self.assertEqual(seen, [])
+
+    def test_chosen_fixed_line_is_not_cut_to_ten_characters(self):
+        self.names = {"Uhung": "Hung Chang Chen"}
+        self.classify_result = False
+        line = comeback.COMEBACK_LINES[6]
+        self.assertGreater(len(line), 10)
+
+        result = self._handle(
+            "垃圾AI",
+            generate=lambda text, quoted=False: line,
+        )
+
+        self.assertEqual(result, "comeback")
+        self.assertEqual(
+            self.replies[0],
+            comeback.COMEBACK_PREFIX + line,
+        )
+
+    def test_bad_generation_falls_back_to_a_fixed_line(self):
+        self.names = {"Uhung": "Hung Chang Chen"}
+        self.classify_result = False
+
+        def explode(text, quoted=False):
+            raise RuntimeError("timeout")
+
+        result = self._handle("垃圾AI", generate=explode)
+
+        self.assertEqual(result, "comeback")
+        self.assertIn(
+            self.replies[0][len(comeback.COMEBACK_PREFIX):],
+            comeback.COMEBACK_LINES,
+        )
+
+        def too_long(text, quoted=False):
+            return "一二三四五六七八九十甲"
+
+        self.replies.clear()
+        result = self._handle("垃圾AI", generate=too_long)
+
+        self.assertEqual(result, "comeback")
+        self.assertIn(
+            self.replies[0][len(comeback.COMEBACK_PREFIX):],
+            comeback.COMEBACK_LINES,
+        )
+
     def test_profile_error_does_not_reply(self):
         self.classify_result = False
 
@@ -863,6 +1060,161 @@ class HandleTests(unittest.TestCase):
 
         self.assertEqual(result, "lookup_error")
         self.assertEqual(self.replies, [])
+
+
+class GenerateTests(unittest.TestCase):
+
+    def setUp(self):
+        os.environ.pop("COMEBACK_REPLY_MODEL", None)
+
+    def tearDown(self):
+        os.environ.pop("COMEBACK_REPLY_MODEL", None)
+
+    def _client(self, outputs):
+        seen = []
+
+        class Response:
+
+            def __init__(self, text):
+                self.output_text = text
+
+        class Client:
+
+            def __init__(self):
+                self.responses = self
+
+            def create(self, **kwargs):
+                seen.append(kwargs)
+                result = outputs.pop(0)
+                if isinstance(result, Exception):
+                    raise result
+                return Response(result)
+
+        return Client(), seen
+
+    def test_short_reply_is_used_as_the_body(self):
+        client, seen = self._client(["「就這水準？」"])
+
+        body = comeback.generate_comeback(client, "垃圾AI")
+
+        self.assertEqual(body, "就這水準？")
+        self.assertLessEqual(len(body), comeback.COMEBACK_MAX_BODY_CHARS)
+        self.assertEqual(seen[0]["model"], "gpt-4o-mini")
+        self.assertNotIn("reasoning", seen[0])
+        self.assertIn("垃圾AI", seen[0]["input"])
+        self.assertIn("10", seen[0]["instructions"])
+        self.assertIn("敬告", seen[0]["instructions"])
+        self.assertEqual(len(seen), 1)
+
+    def test_long_reply_retries_once_then_uses_the_short_one(self):
+        client, seen = self._client([
+            "一二三四五六七八九十甲",
+            "你也配嫌。",
+        ])
+
+        body = comeback.generate_comeback(
+            client,
+            "這台機器人在亂講",
+            quoted=True,
+        )
+
+        self.assertEqual(body, "你也配嫌。")
+        self.assertEqual(len(seen), 2)
+        self.assertIn("（這則是回覆訊息）", seen[1]["input"])
+        self.assertIn("10 個字以內", seen[1]["input"])
+
+    def test_still_long_reply_is_truncated_cleanly(self):
+        client, seen = self._client([
+            "啊" * 15,
+            "一二三四五六七八九，多餘",
+        ])
+
+        body = comeback.generate_comeback(client, "回得什麼鬼")
+
+        self.assertEqual(body, "一二三四五六七八九")
+        self.assertLessEqual(len(body), 10)
+        self.assertEqual(len(seen), 2)
+        self.assertFalse(body.endswith("，"))
+
+    def test_failure_and_forbidden_text_fall_back(self):
+        client, seen = self._client([RuntimeError("timeout")])
+
+        self.assertEqual(
+            comeback.generate_comeback(client, "垃圾AI"),
+            "",
+        )
+        self.assertEqual(len(seen), 1)
+
+        client, seen = self._client(["去你媽的", "智障一個"])
+
+        self.assertEqual(
+            comeback.generate_comeback(client, "人工智障"),
+            "",
+        )
+        self.assertEqual(len(seen), 2)
+
+    def test_echoed_prefix_is_removed_before_counting(self):
+        client, _seen = self._client([
+            "敬告 Hung Chang Chen：就這句。",
+        ])
+
+        self.assertEqual(
+            comeback.generate_comeback(client, "木瓜姊好爛"),
+            "就這句。",
+        )
+
+    def test_json_choice_uses_that_fixed_line(self):
+        line = comeback.COMEBACK_LINES[6]
+        self.assertGreater(len(line), comeback.COMEBACK_MAX_BODY_CHARS)
+        client, seen = self._client([
+            '{"choice": 7, "text": "不要用這句"}',
+        ])
+
+        body = comeback.generate_comeback(client, "垃圾AI")
+
+        self.assertEqual(body, line)
+        self.assertEqual(len(seen), 1)
+        self.assertIn("7. " + line, seen[0]["instructions"])
+        self.assertIn("choice", seen[0]["instructions"])
+
+    def test_json_choice_zero_keeps_a_short_new_line(self):
+        client, seen = self._client([
+            '{"choice": 0, "text": "就這句。"}',
+        ])
+
+        self.assertEqual(
+            comeback.generate_comeback(client, "回得什麼鬼"),
+            "就這句。",
+        )
+        self.assertEqual(len(seen), 1)
+
+    def test_fenced_string_choice_selects_the_numbered_line(self):
+        client, seen = self._client([
+            '```json\n{"choice": "4", "text": ""}\n```',
+        ])
+
+        self.assertEqual(
+            comeback.generate_comeback(client, "AI很爛"),
+            comeback.COMEBACK_LINES[3],
+        )
+        self.assertEqual(len(seen), 1)
+
+    def test_long_json_text_retries_then_accepts_a_line(self):
+        client, seen = self._client([
+            '{"choice": 0, "text": "' + ("啊" * 15) + '"}',
+            '{"choice": 2, "text": ""}',
+        ])
+
+        body = comeback.generate_comeback(
+            client,
+            "這台機器人在亂講",
+            quoted=True,
+        )
+
+        self.assertEqual(body, comeback.COMEBACK_LINES[1])
+        self.assertEqual(len(seen), 2)
+        self.assertIn("（這則是回覆訊息）", seen[1]["input"])
+        self.assertIn("10 個字以內", seen[1]["input"])
 
 
 class FakeHttpResponse:
@@ -1012,7 +1364,9 @@ class WebhookTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.calls, [])
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0]["model"], "gpt-4o-mini")
+        self.assertNotIn("你就是「木瓜姐」", self.calls[0]["instructions"])
         self.assertEqual(len(self._member_gets()), 1)
         self.assertEqual(
             self._member_gets()[0]["url"],
@@ -1312,7 +1666,7 @@ class WebhookTests(unittest.TestCase):
         response = self._post_event(event)
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(len(self.calls), 2)
         self.assertIn("問了也是白問", self.calls[0]["instructions"])
         self.assertTrue(
             self.calls[0]["input"].startswith("（這則是回覆訊息）\n")
@@ -1391,7 +1745,8 @@ class WebhookTests(unittest.TestCase):
             ],
             ["https://api.line.me/v2/bot/group/Ctrain/summary"],
         )
-        self.assertEqual(self.calls, [])
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0]["model"], "gpt-4o-mini")
 
     def test_other_named_group_still_ignores_other_senders(self):
         self.group_names["Cpig"] = "燒豬群"
@@ -1426,6 +1781,148 @@ class WebhookTests(unittest.TestCase):
             self.posts[0]["json"]["messages"][0]["text"].startswith(
                 comeback.COMEBACK_PREFIX
             )
+        )
+
+    def test_webhook_sends_the_generated_body_with_the_prefix(self):
+        self._scripted.append(FakeChatResponse("就這水準？"))
+
+        response = self._post_event(
+            self._text_event(
+                "垃圾AI",
+                user_id="Uhung",
+                source_type="group",
+            )
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            self.posts[0]["json"]["messages"][0]["text"],
+            "敬告 Hung Chang Chen：就這水準？",
+        )
+        self.assertEqual(self.calls[0]["model"], "gpt-4o-mini")
+        self.assertIn("垃圾AI", self.calls[0]["input"])
+
+        self.group_names["Ctrain"] = "自動回覆訓練區"
+        self.names["Uowner"] = "侯鎮邦"
+        self._scripted.append(FakeChatResponse("你也配嫌。"))
+        trained = self._post_event(
+            self._text_event(
+                "機器人真的很蠢",
+                user_id="Uowner",
+                source_type="group",
+                group_id="Ctrain",
+            )
+        )
+
+        self.assertEqual(trained.status_code, 200)
+        self.assertEqual(
+            self.posts[-1]["json"]["messages"][0]["text"],
+            "敬告 侯鎮邦：你也配嫌。",
+        )
+
+    def test_webhook_truncates_then_falls_back_on_timeout(self):
+        self._scripted.extend([
+            FakeChatResponse("啊" * 12),
+            FakeChatResponse("一二三四五六七八九，多餘"),
+        ])
+
+        clipped = self._post_event(
+            self._text_event(
+                "垃圾AI",
+                user_id="Uhung",
+                source_type="group",
+            )
+        )
+
+        self.assertEqual(clipped.status_code, 200)
+        self.assertEqual(
+            self.posts[0]["json"]["messages"][0]["text"],
+            "敬告 Hung Chang Chen：一二三四五六七八九",
+        )
+        self.assertEqual(len(self.calls), 2)
+
+        self._scripted.append(RuntimeError("timeout"))
+        failed = self._post_event(
+            self._text_event(
+                "AI很爛",
+                user_id="Uhung",
+                source_type="group",
+            )
+        )
+
+        self.assertEqual(failed.status_code, 200)
+        sent = self.posts[-1]["json"]["messages"][0]["text"]
+        self.assertTrue(sent.startswith(comeback.COMEBACK_PREFIX))
+        self.assertIn(
+            sent[len(comeback.COMEBACK_PREFIX):],
+            comeback.COMEBACK_LINES,
+        )
+
+    def test_profanity_replies_without_calling_openai(self):
+        before = len(self.calls)
+        response = self._post_event(
+            self._text_event(
+                "操 你 媽",
+                user_id="Uhung",
+                source_type="group",
+            )
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(self.calls), before)
+        self.assertEqual(
+            self.posts[0]["json"]["messages"][0]["text"],
+            "敬告 Hung Chang Chen：你自己操自己",
+        )
+
+        self.names["Uother"] = "Other Person"
+        quiet = self._post_event(
+            self._text_event(
+                "幹你娘",
+                user_id="Uother",
+                source_type="group",
+            )
+        )
+        self.assertEqual(quiet.status_code, 200)
+        self.assertEqual(len(self.posts), 1)
+        self.assertEqual(len(self.calls), before)
+
+        self.group_names["Ctrain"] = "自動回覆訓練區"
+        self.names["Uowner"] = "侯鎮邦"
+        trained = self._post_event(
+            self._text_event(
+                "靠杯",
+                user_id="Uowner",
+                source_type="group",
+                group_id="Ctrain",
+            )
+        )
+        self.assertEqual(trained.status_code, 200)
+        self.assertEqual(
+            self.posts[-1]["json"]["messages"][0]["text"],
+            "敬告 侯鎮邦：你自己操自己",
+        )
+        self.assertEqual(len(self.calls), before)
+
+    def test_webhook_sends_the_numbered_fixed_line(self):
+        line = comeback.COMEBACK_LINES[3]
+        self._scripted.append(
+            FakeChatResponse('{"choice": 4, "text": "別用我"}')
+        )
+
+        response = self._post_event(
+            self._text_event(
+                "垃圾AI",
+                user_id="Uhung",
+                source_type="group",
+            )
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(
+            self.posts[0]["json"]["messages"][0]["text"],
+            comeback.COMEBACK_PREFIX + line,
         )
 
 

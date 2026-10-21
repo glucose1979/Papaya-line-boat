@@ -4,8 +4,10 @@ In a group, a message from the display name "Hung Chang Chen" that
 insults the bot, the AI, or its replies gets one short reply. Keyword
 hits reply immediately. Any other non-empty text from that sender, up
 to CLASSIFY_MAX_CHARS, is classified by meaning. Other senders are
-never classified. The reply uses the webhook reply token. Push is
-never used.
+never classified. A triggered reply is written for that message and
+kept to COMEBACK_MAX_BODY_CHARS characters; a failure uses one of the
+fixed lines. The reply uses the webhook reply token. Push is never
+used.
 
 The group named 自動回覆訓練區 is the exception: any sender counts,
 and the reply prefix uses that sender's display name. The group name
@@ -18,6 +20,7 @@ cache, then starts from the env default again. Render's one-worker
 gunicorn process is the intended setup.
 """
 
+import json
 import os
 import random
 import re
@@ -31,6 +34,8 @@ DISPLAY_NAME_TTL_SECONDS = 12 * 60 * 60
 CLASSIFY_MODEL_DEFAULT = "gpt-4o-mini"
 CLASSIFY_TIMEOUT_SECONDS = 8
 CLASSIFY_MAX_CHARS = 300
+REPLY_MODEL_DEFAULT = "gpt-4o-mini"
+COMEBACK_MAX_BODY_CHARS = 10
 
 TOGGLE_ON_TEXT = "吵架模式開"
 TOGGLE_OFF_TEXT = "吵架模式關"
@@ -41,6 +46,50 @@ STATUS_ON_REPLY = "吵架模式現在是開的。"
 STATUS_OFF_REPLY = "吵架模式現在是關的。"
 COMEBACK_PREFIX = "敬告 Hung Chang Chen："
 TRAINING_GROUP_NAME = "自動回覆訓練區"
+PROFANITY_REPLY = "你自己操自己"
+
+# The generated body is checked again in code. Fixed fallback lines
+# are not passed through this list.
+REPLY_FORBIDDEN = (
+    "幹",
+    "媽",
+    "娘",
+    "爸",
+    "死",
+    "殺",
+    "殘",
+    "智障",
+    "腦殘",
+    "白痴",
+    "白癡",
+    "醜",
+    "肥",
+    "矮",
+    "胖",
+    "尻",
+    "婊",
+    "淫",
+    "操",
+    "靠腰",
+    "屎",
+    "fuck",
+    "shit",
+    "bitch",
+)
+
+REPLY_INSTRUCTIONS = (
+    "你是群組裡的機器人「木瓜姐」。對方剛剛侮辱、嘲諷或貶低你、"
+    "AI、機器人或你的回覆。\n"
+    "先判斷下面哪一句在邏輯上最貼切。貼切就選那一句的編號。"
+    "九句都不貼切，才自己寫一句。\n"
+    "只輸出一個 JSON，不要加敬告、名字、前言或解釋：\n"
+    '{"choice": 1, "text": ""}\n'
+    "choice 是 1 到 9：用該句，text 留空。\n"
+    "choice 是 0：九句都不行，text 寫新的回嘴，最多 10 個字，標點也算。\n"
+    "可以刻薄、挖苦、諷刺。禁止髒話、詛咒、威脅、色情、歧視，"
+    "也禁止辱罵家人、外貌、殘疾或族群。\n"
+    "九句是：\n"
+)
 
 # Short game-banter. No slurs, no family profanity, no appearance,
 # disability, ethnicity, or sex, and no threats.
@@ -363,6 +412,116 @@ def normalize_insult_text(text):
     text = re.sub(r"\s+", "", text)
 
     return text
+
+
+_PROFANITY_NI = r"(?:你|妳|伱|尼|泥)"
+_PROFANITY_MA = r"(?:媽|妈|馬|马|瑪|玛|嘛|麻)"
+_PROFANITY_NIANG = r"(?:娘|孃)"
+_PROFANITY_HEAD = r"(?:操|肏|草|槽|糙|吵|曹|抄|幹|干|淦|乾)"
+_PROFANITY_FAMILY = (
+    rf"(?:{_PROFANITY_NI}(?:"
+    rf"{_PROFANITY_MA}|{_PROFANITY_NIANG}|家|老師|老师"
+    rf")|{_PROFANITY_NI})"
+)
+
+# Phrases, after spaces and symbols are removed. Longer family
+# targets are listed before a bare 你, so 幹你老師 still matches.
+_PROFANITY_PHRASE = re.compile(
+    rf"(?:{_PROFANITY_HEAD}{_PROFANITY_FAMILY}"
+    rf"|(?:添|舔){_PROFANITY_NI}{_PROFANITY_NIANG}"
+    rf"|x{_PROFANITY_NI}{_PROFANITY_NIANG}"
+    rf"|靠(?:北|杯|背|悲)"
+    rf"|(?<![a-z0-9])cnm(?![a-z0-9]))"
+)
+
+# 幹 / 淦 as an expletive. Benign compounds are removed first.
+_STANDALONE_GAN = re.compile(r"幹|淦")
+_BENIGN_GAN = tuple(sorted((
+    "幹部",
+    "干部",
+    "幹事",
+    "干事",
+    "幹活",
+    "干活",
+    "樹幹",
+    "树干",
+    "幹嘛",
+    "干嘛",
+    "幹嗎",
+    "干吗",
+    "幹麼",
+    "幹什麼",
+    "干什麼",
+    "干什么",
+    "若干",
+    "幹練",
+    "干练",
+    "幹勁",
+    "干劲",
+    "主幹",
+    "主干",
+    "幹道",
+    "干道",
+    "幹線",
+    "干线",
+    "骨幹",
+    "骨干",
+    "公幹",
+    "公干",
+    "幹校",
+    "干校",
+    "幹群",
+    "干群",
+    "幹警",
+    "干警",
+    "幹員",
+    "干员",
+    "幹淨",
+    "干净",
+), key=len, reverse=True))
+
+
+def _compact_profanity(text):
+
+    if not isinstance(text, str):
+        return ""
+
+    text = unicodedata.normalize("NFKC", text).lower()
+    text = re.sub(
+        r"(?<![0-9a-z\u4e00-\u9fff])[×✕✖*＊x](?=(?:你|妳|伱|尼|泥))",
+        "x",
+        text,
+    )
+    kept = []
+
+    for char in text:
+
+        if (
+            "\u4e00" <= char <= "\u9fff"
+            or "a" <= char <= "z"
+            or "0" <= char <= "9"
+        ):
+            kept.append(char)
+
+    return "".join(kept)
+
+
+def is_profanity(text):
+
+    compact = _compact_profanity(text)
+
+    if not compact:
+        return False
+
+    if _PROFANITY_PHRASE.search(compact):
+        return True
+
+    scrubbed = compact
+
+    for phrase in _BENIGN_GAN:
+        scrubbed = scrubbed.replace(phrase, "")
+
+    return _STANDALONE_GAN.search(scrubbed) is not None
 
 
 def is_insult(text):
@@ -760,6 +919,323 @@ def classify_insult(openai_client, text, quoted=False):
     return _answer_is_yes(answer)
 
 
+def _reply_instructions():
+
+    numbered = "\n".join(
+        f"{index}. {line}"
+        for index, line in enumerate(COMEBACK_LINES, start=1)
+    )
+
+    return REPLY_INSTRUCTIONS + numbered
+
+
+def _reply_model():
+
+    model = (os.environ.get("COMEBACK_REPLY_MODEL") or "").strip()
+
+    return model or REPLY_MODEL_DEFAULT
+
+
+def prepare_comeback_body(raw):
+
+    if not isinstance(raw, str):
+        return ""
+
+    text = ""
+
+    for line in raw.splitlines():
+
+        line = line.strip()
+
+        if line:
+            text = line
+            break
+
+    if not text:
+        return ""
+
+    quotes = "\"'「」『』“”‘’"
+
+    while (
+        len(text) >= 2
+        and text[0] in quotes
+        and text[-1] in quotes
+    ):
+        text = text[1:-1].strip()
+
+    if text.startswith("敬告"):
+
+        for separator in ("：", ":"):
+
+            if separator in text:
+                text = text.split(separator, 1)[1].strip()
+                break
+
+    while (
+        len(text) >= 2
+        and text[0] in quotes
+        and text[-1] in quotes
+    ):
+        text = text[1:-1].strip()
+
+    return text.strip()
+
+
+def comeback_body_forbidden(text):
+
+    if not isinstance(text, str) or not text:
+        return False
+
+    lowered = text.lower()
+
+    return any(
+        word in text or word in lowered
+        for word in REPLY_FORBIDDEN
+    )
+
+
+def truncate_comeback_body(text):
+
+    if not isinstance(text, str):
+        return ""
+
+    if len(text) <= COMEBACK_MAX_BODY_CHARS:
+        return text
+
+    trimmed = text[:COMEBACK_MAX_BODY_CHARS].rstrip(
+        " \t，,、。.!！?？~～…"
+    )
+
+    return trimmed
+
+
+def _comeback_body_ok(text):
+
+    return (
+        isinstance(text, str)
+        and bool(text)
+        and len(text) <= COMEBACK_MAX_BODY_CHARS
+        and not comeback_body_forbidden(text)
+    )
+
+
+def _finish_comeback_body(text):
+
+    if not text or comeback_body_forbidden(text):
+        return ""
+
+    if len(text) <= COMEBACK_MAX_BODY_CHARS:
+        return text
+
+    trimmed = truncate_comeback_body(text)
+
+    if _comeback_body_ok(trimmed):
+        return trimmed
+
+    return ""
+
+
+def _reply_input(text, quoted, previous):
+
+    body = (text or "").strip()[:CLASSIFY_MAX_CHARS]
+
+    if quoted:
+        body = "（這則是回覆訊息）\n" + body
+
+    prompt = "對方剛說：\n" + body
+
+    if previous:
+
+        prompt += (
+            "\n\n上一句超過 10 個字或不合格，不要再用："
+            + previous[:40]
+            + "\n請改成 10 個字以內的一句。"
+        )
+
+    return prompt
+
+
+def _request_comeback(openai_client, text, quoted, previous):
+
+    model = _reply_model()
+    kwargs = {
+        "model": model,
+        "instructions": _reply_instructions(),
+        "input": _reply_input(text, quoted, previous),
+        "max_output_tokens": 64,
+        "timeout": CLASSIFY_TIMEOUT_SECONDS,
+    }
+
+    if "gpt-5" in model:
+        kwargs["reasoning"] = {"effort": "minimal"}
+        kwargs["max_output_tokens"] = 200
+
+    response = openai_client.responses.create(**kwargs)
+
+    return getattr(response, "output_text", None) or ""
+
+
+def _choice_number(raw):
+
+    if isinstance(raw, bool) or raw is None:
+        return None
+
+    if isinstance(raw, int):
+        return raw
+
+    if isinstance(raw, str):
+
+        token = raw.strip()
+
+        if token.lstrip("-").isdigit():
+            return int(token)
+
+    return None
+
+
+def _parse_reply_payload(raw):
+
+    if not isinstance(raw, str) or "{" not in raw:
+        return None
+
+    try:
+
+        payload, _end = json.JSONDecoder().raw_decode(
+            raw.strip()[raw.strip().find("{"):]
+        )
+
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(payload, dict) or "choice" not in payload:
+        return None
+
+    return payload
+
+
+def _plain_reply_text(raw):
+
+    payload = _parse_reply_payload(raw)
+
+    if payload is not None:
+
+        text = payload.get("text")
+
+        if not isinstance(text, str):
+            return ""
+
+        return prepare_comeback_body(text)
+
+    if not isinstance(raw, str):
+        return ""
+
+    return prepare_comeback_body(raw)
+
+
+def _read_reply(raw):
+
+    payload = _parse_reply_payload(raw)
+
+    if payload is not None:
+
+        number = _choice_number(payload.get("choice"))
+
+        if (
+            number is not None
+            and 1 <= number <= len(COMEBACK_LINES)
+        ):
+            return COMEBACK_LINES[number - 1], ""
+
+    text = _plain_reply_text(raw)
+
+    if _comeback_body_ok(text):
+        return text, ""
+
+    return "", text or "不合格"
+
+
+def generate_comeback(openai_client, text, quoted=False):
+
+    try:
+
+        first_raw = _request_comeback(
+            openai_client,
+            text,
+            quoted,
+            None,
+        )
+
+    except Exception as exc:
+
+        print(
+            "Comeback reply error:",
+            type(exc).__name__
+        )
+
+        return ""
+
+    chosen, hint = _read_reply(first_raw)
+
+    if chosen:
+        return chosen
+
+    try:
+
+        second_raw = _request_comeback(
+            openai_client,
+            text,
+            quoted,
+            hint,
+        )
+
+    except Exception as exc:
+
+        print(
+            "Comeback reply error:",
+            type(exc).__name__
+        )
+
+        return _finish_comeback_body(_plain_reply_text(first_raw))
+
+    chosen, _hint = _read_reply(second_raw)
+
+    if chosen:
+        return chosen
+
+    finished = _finish_comeback_body(_plain_reply_text(second_raw))
+
+    if finished:
+        return finished
+
+    return _finish_comeback_body(_plain_reply_text(first_raw))
+
+
+def _comeback_line(text, quoted, generate):
+
+    if generate is not None:
+
+        try:
+
+            generated = generate(text, quoted=bool(quoted))
+
+        except Exception as exc:
+
+            print(
+                "Comeback reply error:",
+                type(exc).__name__
+            )
+
+            generated = ""
+
+        if isinstance(generated, str):
+            generated = generated.strip()
+
+        if generated in COMEBACK_LINES or _comeback_body_ok(generated):
+            return generated
+
+    return pick_comeback()
+
+
 def _toggle_allowed(user_id, owner_user_id):
 
     if not isinstance(owner_user_id, str) or owner_user_id == "":
@@ -778,6 +1254,7 @@ def handle_group_text(
     owner_user_id,
     quoted=False,
     training=False,
+    generate=None,
 ):
 
     if not isinstance(text, str):
@@ -820,8 +1297,9 @@ def handle_group_text(
         return "disabled"
 
     strong = is_insult(stripped)
+    profane = is_profanity(stripped)
 
-    if not strong and not should_classify(stripped):
+    if not profane and not strong and not should_classify(stripped):
         return "ignore"
 
     try:
@@ -839,6 +1317,15 @@ def handle_group_text(
 
     if not training and not is_target_sender(name):
         return "not_target"
+
+    if profane:
+
+        if training:
+            reply(format_training_comeback(PROFANITY_REPLY, name))
+        else:
+            reply(format_group_comeback(PROFANITY_REPLY))
+
+        return "profanity"
 
     if not strong:
 
@@ -860,7 +1347,7 @@ def handle_group_text(
         if not insulting:
             return "not_insult"
 
-    line = pick_comeback()
+    line = _comeback_line(stripped, quoted, generate)
 
     if training:
         reply(format_training_comeback(line, name))
