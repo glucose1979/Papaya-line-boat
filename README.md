@@ -16,13 +16,13 @@ This bot already sets `OWNER_USER_ID`, so only that user can toggle the mode. Ty
 
 A trailing `。` or `!` is ignored. Anyone else typing them is ignored. The bot replies in that same chat with `吵架模式開了。`, `吵架模式關了。`, `吵架模式現在是開的。`, or `吵架模式現在是關的。` The status line reports the current global switch and does not change it. These lines are not sent to the private-chat model and are not pushed to the group.
 
-The switch defaults to **on** after deploy. `吵架模式開` / `吵架模式關` override that until the process restarts. A restart or a new deploy clears the in-memory override and the name cache, then starts again from `COMEBACK_MODE` (on when that variable is unset). Keep gunicorn at one worker, the same constraint `/dl` already documents, so the override is the one the group sees.
+The switch defaults to **on** after deploy. `吵架模式開` / `吵架模式關` override that until the process restarts. A restart or a new deploy clears the in-memory override, the name cache, and each group's recent-reply list, then starts again from `COMEBACK_MODE` (on when that variable is unset). Keep gunicorn at one worker, the same constraint `/dl` already documents, so the override is the one the group sees.
 
 | Variable | Required | Default | Meaning |
 | --- | --- | --- | --- |
 | `COMEBACK_MODE` | no | on | Unset, empty, `on`, `1`, or `true` starts enabled. `off`, `0`, `false`, `no`, or `關` starts disabled. |
 | `COMEBACK_CLASSIFY_MODEL` | no | `gpt-4o-mini` | Used only for a matched sender, and only when the message is not a keyword hit and is at most 300 characters. That sender is Hung Chang Chen in every group, or anyone in `自動回覆訓練區`. Other senders in other groups are never classified. `gpt-5-mini` is accepted. A failure or a `no` sends nothing. |
-| `COMEBACK_REPLY_MODEL` | no | `gpt-4o-mini` | Writes the comeback body after a trigger. The body, not counting the prefix, is at most 10 characters. A timeout or error uses one of the nine fixed lines. |
+| `COMEBACK_REPLY_MODEL` | no | `gpt-4o-mini` | Writes the comeback body after a trigger, at temperature 1.0. A fixed line is used only when it fits that insult. A new body, not counting the prefix, is at most 10 characters. A timeout or error uses one of the nine fixed lines that this group has not just sent. |
 
 No new secret. The profile call uses `LINE_CHANNEL_ACCESS_TOKEN`. Classification and the short comeback both use the existing `OPENAI_API_KEY`.
 
@@ -30,7 +30,7 @@ Keyword hits (insult word next to AI／人工智慧／機器人／回覆／回�
 
 Insult words: 垃圾, 廢物, 廢柴, 智障, 腦殘, 笨蛋, 白痴, 白癡, 低能, 沒用, 狗屁, 狗屎, 扯淡, 靠北, 三小, 有病, 機車, 爛, 廢, 蠢, 傻, 笨, 鳥, 糟, 遜, 菜, 雷, 差, 爛透, 爛透了. English, next to AI: garbage, trash, stupid, dumb, useless, lame, worst, shitty, bad, sucks.
 
-A keyword hit of any length skips the classifier. Every other non-empty message from a matched sender, up to 300 characters, is sent to the classifier. That includes synonyms, slang, sarcasm, simplified Chinese, mixed English, and a short dismissive message sent as a reply to the bot. No target word is required. Other senders are never classified. The name lookup still runs for those other short messages so the bot can tell who they are, then the result is cached for 12 hours.
+A keyword hit of any length skips the classifier. Every other non-empty message from a matched sender, up to 300 characters, is sent to the classifier. That includes synonyms, slang, sarcasm, simplified Chinese, mixed English, and a short dismissive message sent as a reply to the bot. No target word is required. The classifier runs only after the sender is already eligible, so a bare insult counts as aimed at 木瓜姊. Appearance, intelligence, and sexual-function jabs are yes, including 醜八怪, 你性功能障礙, 白癡, 大白癡, 低能兒, 胸大無腦, and 白癡加三級. Other senders are never classified. The name lookup still runs for those other short messages so the bot can tell who they are, then the result is cached for 12 hours.
 
 `垃圾分類` and `垃圾車`, praise, questions, and other topics are instructions to answer no. Uncertain answers no. A message longer than 300 characters is ignored unless it already matches a keyword. Examples the classifier is told to treat as yes: 垃圾AI, 垃圾垃圾回覆, 木瓜姊好爛, 機器人真的很蠢, AI的回答有夠廢, 這台機器人在亂講, 回得什麼鬼, 人工智障, 問了也是白問.
 
@@ -46,7 +46,9 @@ Comeback lines:
 8. 你的見識，就跟你的發言一樣廉價。
 9. 罵得這麼用力，可惜沒半個人在聽。
 
-When a comeback triggers, and the message is not profanity, one gpt-4o-mini call returns JSON `{"choice": 1-9 or 0, "text": "..."}`. `choice` 1 through 9 sends that fixed line, even when the line is longer than 10 characters. `choice` 0 means none of the nine fits, so `text` is a new comeback: the body, not counting `敬告 <name>：`, is at most 10 characters. The code counts characters. A longer `text` is requested once more. If it is still longer, it is cut to 10 characters without leaving a dangling comma, or a random line from the nine is used. Profanity, slurs, threats, and sexual content are dropped from a newly written line. If the API errors or times out, one of those nine lines is used at random.
+When a comeback triggers, and the message is not profanity, one gpt-4o-mini call at temperature 1.0 returns JSON `{"choice": 1-9 or 0, "text": "..."}`. `choice` 1 through 9 is used only when that exact line fits this insult, and the line is sent even when it is longer than 10 characters. Otherwise `choice` is 0 and `text` is a new comeback that plays on the words just used. The body, not counting `敬告 <name>：`, is at most 10 characters. The code counts characters. A longer, empty, forbidden, or repeated `text` is requested once more. If it is still longer, it is cut to 10 characters without leaving a dangling comma, or a random line from the nine is used. Profanity, slurs, threats, and sexual content are dropped from a newly written line. A sexual jab can trigger a reply; the reply itself stays non-explicit. If the API errors or times out, one of those nine lines is used at random.
+
+Each group keeps the last five reply bodies in memory. They are passed to the model as forbidden, and a newly written line or a chosen fixed line that matches one of them is not sent again. The random fallback skips those recent lines while another fixed line remains. The profanity reply is still `你自己操自己` even when that body was just used.
 
 Chinese profanity from a sender who can already trigger comebacks skips the model. A keyword match is enough, including spaces, symbols, and homophones: 操你媽, 幹你娘, 幹你老師, 操 or 幹 plus 你媽 / 你娘 / 你家 / 你, a bare 幹, 靠北, 靠杯, 添你娘, and X你娘. The body is exactly `你自己操自己`, with the same prefix as any other comeback. It does not have to be about the bot. Anyone else saying those words gets no reply and no API call. 幹嘛, 幹部, and 樹幹 are not treated as that expletive.
 
