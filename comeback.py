@@ -42,6 +42,9 @@ COMEBACK_LINES = (
     "水準在這，回覆就在這。",
     "垃圾進，垃圾出，公平。",
     "這種話，只配這種回。",
+    "連 AI 都懶得跟你計較，你自己品味一下。",
+    "你的見識，就跟你的發言一樣廉價。",
+    "罵得這麼用力，可惜沒半個人在聽。",
 )
 
 # Words that disparage the bot when they sit on a target.

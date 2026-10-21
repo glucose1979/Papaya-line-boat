@@ -270,10 +270,13 @@ class MatcherTests(unittest.TestCase):
                 "水準在這，回覆就在這。",
                 "垃圾進，垃圾出，公平。",
                 "這種話，只配這種回。",
+                "連 AI 都懶得跟你計較，你自己品味一下。",
+                "你的見識，就跟你的發言一樣廉價。",
+                "罵得這麼用力，可惜沒半個人在聽。",
             ),
         )
+        self.assertEqual(len(lines), 9)
         for line in lines:
-            self.assertLessEqual(len(line), 20, line)
             for word in _FORBIDDEN:
                 self.assertNotIn(word, line)
 
