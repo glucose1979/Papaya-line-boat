@@ -998,6 +998,23 @@ class HandleTests(unittest.TestCase):
         self.assertEqual(len(self.lookups), lookups_before)
         self.assertEqual(seen, [])
 
+    def test_chosen_fixed_line_is_not_cut_to_ten_characters(self):
+        self.names = {"Uhung": "Hung Chang Chen"}
+        self.classify_result = False
+        line = comeback.COMEBACK_LINES[6]
+        self.assertGreater(len(line), 10)
+
+        result = self._handle(
+            "垃圾AI",
+            generate=lambda text, quoted=False: line,
+        )
+
+        self.assertEqual(result, "comeback")
+        self.assertEqual(
+            self.replies[0],
+            comeback.COMEBACK_PREFIX + line,
+        )
+
     def test_bad_generation_falls_back_to_a_fixed_line(self):
         self.names = {"Uhung": "Hung Chang Chen"}
         self.classify_result = False
@@ -1145,6 +1162,59 @@ class GenerateTests(unittest.TestCase):
             comeback.generate_comeback(client, "木瓜姊好爛"),
             "就這句。",
         )
+
+    def test_json_choice_uses_that_fixed_line(self):
+        line = comeback.COMEBACK_LINES[6]
+        self.assertGreater(len(line), comeback.COMEBACK_MAX_BODY_CHARS)
+        client, seen = self._client([
+            '{"choice": 7, "text": "不要用這句"}',
+        ])
+
+        body = comeback.generate_comeback(client, "垃圾AI")
+
+        self.assertEqual(body, line)
+        self.assertEqual(len(seen), 1)
+        self.assertIn("7. " + line, seen[0]["instructions"])
+        self.assertIn("choice", seen[0]["instructions"])
+
+    def test_json_choice_zero_keeps_a_short_new_line(self):
+        client, seen = self._client([
+            '{"choice": 0, "text": "就這句。"}',
+        ])
+
+        self.assertEqual(
+            comeback.generate_comeback(client, "回得什麼鬼"),
+            "就這句。",
+        )
+        self.assertEqual(len(seen), 1)
+
+    def test_fenced_string_choice_selects_the_numbered_line(self):
+        client, seen = self._client([
+            '```json\n{"choice": "4", "text": ""}\n```',
+        ])
+
+        self.assertEqual(
+            comeback.generate_comeback(client, "AI很爛"),
+            comeback.COMEBACK_LINES[3],
+        )
+        self.assertEqual(len(seen), 1)
+
+    def test_long_json_text_retries_then_accepts_a_line(self):
+        client, seen = self._client([
+            '{"choice": 0, "text": "' + ("啊" * 15) + '"}',
+            '{"choice": 2, "text": ""}',
+        ])
+
+        body = comeback.generate_comeback(
+            client,
+            "這台機器人在亂講",
+            quoted=True,
+        )
+
+        self.assertEqual(body, comeback.COMEBACK_LINES[1])
+        self.assertEqual(len(seen), 2)
+        self.assertIn("（這則是回覆訊息）", seen[1]["input"])
+        self.assertIn("10 個字以內", seen[1]["input"])
 
 
 class FakeHttpResponse:
@@ -1833,6 +1903,27 @@ class WebhookTests(unittest.TestCase):
             "敬告 侯鎮邦：你自己操自己",
         )
         self.assertEqual(len(self.calls), before)
+
+    def test_webhook_sends_the_numbered_fixed_line(self):
+        line = comeback.COMEBACK_LINES[3]
+        self._scripted.append(
+            FakeChatResponse('{"choice": 4, "text": "別用我"}')
+        )
+
+        response = self._post_event(
+            self._text_event(
+                "垃圾AI",
+                user_id="Uhung",
+                source_type="group",
+            )
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(
+            self.posts[0]["json"]["messages"][0]["text"],
+            comeback.COMEBACK_PREFIX + line,
+        )
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ cache, then starts from the env default again. Render's one-worker
 gunicorn process is the intended setup.
 """
 
+import json
 import os
 import random
 import re
@@ -78,16 +79,16 @@ REPLY_FORBIDDEN = (
 
 REPLY_INSTRUCTIONS = (
     "你是群組裡的機器人「木瓜姐」。對方剛剛侮辱、嘲諷或貶低你、"
-    "AI、機器人或你的回覆。請針對他剛說的那句話，回一句尖銳、"
-    "諷刺、不留情的回嘴。\n"
-    "規則：\n"
-    "1. 只輸出回嘴正文。不要加「敬告」、名字、引號、前言或解釋。\n"
-    "2. 正文最多 10 個字，標點也算。超過 10 個字就重寫到 10 個字以內。\n"
-    "3. 用繁體中文，要接他的用詞回，不要拿固定套話敷衍。\n"
-    "4. 可以刻薄、挖苦、諷刺。禁止髒話、詛咒、威脅、色情、歧視，"
-    "也禁止辱罵家人、外貌、殘疾或族群。"
-    "不要用幹、操、媽、死、殺、智障、白痴這類字。\n"
-    "5. 不要空白。不確定也回一句短的。"
+    "AI、機器人或你的回覆。\n"
+    "先判斷下面哪一句在邏輯上最貼切。貼切就選那一句的編號。"
+    "九句都不貼切，才自己寫一句。\n"
+    "只輸出一個 JSON，不要加敬告、名字、前言或解釋：\n"
+    '{"choice": 1, "text": ""}\n'
+    "choice 是 1 到 9：用該句，text 留空。\n"
+    "choice 是 0：九句都不行，text 寫新的回嘴，最多 10 個字，標點也算。\n"
+    "可以刻薄、挖苦、諷刺。禁止髒話、詛咒、威脅、色情、歧視，"
+    "也禁止辱罵家人、外貌、殘疾或族群。\n"
+    "九句是：\n"
 )
 
 # Short game-banter. No slurs, no family profanity, no appearance,
@@ -918,6 +919,16 @@ def classify_insult(openai_client, text, quoted=False):
     return _answer_is_yes(answer)
 
 
+def _reply_instructions():
+
+    numbered = "\n".join(
+        f"{index}. {line}"
+        for index, line in enumerate(COMEBACK_LINES, start=1)
+    )
+
+    return REPLY_INSTRUCTIONS + numbered
+
+
 def _reply_model():
 
     model = (os.environ.get("COMEBACK_REPLY_MODEL") or "").strip()
@@ -1049,7 +1060,7 @@ def _request_comeback(openai_client, text, quoted, previous):
     model = _reply_model()
     kwargs = {
         "model": model,
-        "instructions": REPLY_INSTRUCTIONS,
+        "instructions": _reply_instructions(),
         "input": _reply_input(text, quoted, previous),
         "max_output_tokens": 64,
         "timeout": CLASSIFY_TIMEOUT_SECONDS,
@@ -1062,6 +1073,85 @@ def _request_comeback(openai_client, text, quoted, previous):
     response = openai_client.responses.create(**kwargs)
 
     return getattr(response, "output_text", None) or ""
+
+
+def _choice_number(raw):
+
+    if isinstance(raw, bool) or raw is None:
+        return None
+
+    if isinstance(raw, int):
+        return raw
+
+    if isinstance(raw, str):
+
+        token = raw.strip()
+
+        if token.lstrip("-").isdigit():
+            return int(token)
+
+    return None
+
+
+def _parse_reply_payload(raw):
+
+    if not isinstance(raw, str) or "{" not in raw:
+        return None
+
+    try:
+
+        payload, _end = json.JSONDecoder().raw_decode(
+            raw.strip()[raw.strip().find("{"):]
+        )
+
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(payload, dict) or "choice" not in payload:
+        return None
+
+    return payload
+
+
+def _plain_reply_text(raw):
+
+    payload = _parse_reply_payload(raw)
+
+    if payload is not None:
+
+        text = payload.get("text")
+
+        if not isinstance(text, str):
+            return ""
+
+        return prepare_comeback_body(text)
+
+    if not isinstance(raw, str):
+        return ""
+
+    return prepare_comeback_body(raw)
+
+
+def _read_reply(raw):
+
+    payload = _parse_reply_payload(raw)
+
+    if payload is not None:
+
+        number = _choice_number(payload.get("choice"))
+
+        if (
+            number is not None
+            and 1 <= number <= len(COMEBACK_LINES)
+        ):
+            return COMEBACK_LINES[number - 1], ""
+
+    text = _plain_reply_text(raw)
+
+    if _comeback_body_ok(text):
+        return text, ""
+
+    return "", text or "不合格"
 
 
 def generate_comeback(openai_client, text, quoted=False):
@@ -1084,10 +1174,10 @@ def generate_comeback(openai_client, text, quoted=False):
 
         return ""
 
-    first = prepare_comeback_body(first_raw)
+    chosen, hint = _read_reply(first_raw)
 
-    if _comeback_body_ok(first):
-        return first
+    if chosen:
+        return chosen
 
     try:
 
@@ -1095,7 +1185,7 @@ def generate_comeback(openai_client, text, quoted=False):
             openai_client,
             text,
             quoted,
-            first or prepare_comeback_body(first_raw) or first_raw,
+            hint,
         )
 
     except Exception as exc:
@@ -1105,19 +1195,19 @@ def generate_comeback(openai_client, text, quoted=False):
             type(exc).__name__
         )
 
-        return _finish_comeback_body(first)
+        return _finish_comeback_body(_plain_reply_text(first_raw))
 
-    second = prepare_comeback_body(second_raw)
+    chosen, _hint = _read_reply(second_raw)
 
-    if _comeback_body_ok(second):
-        return second
+    if chosen:
+        return chosen
 
-    finished = _finish_comeback_body(second)
+    finished = _finish_comeback_body(_plain_reply_text(second_raw))
 
     if finished:
         return finished
 
-    return _finish_comeback_body(first)
+    return _finish_comeback_body(_plain_reply_text(first_raw))
 
 
 def _comeback_line(text, quoted, generate):
@@ -1140,7 +1230,7 @@ def _comeback_line(text, quoted, generate):
         if isinstance(generated, str):
             generated = generated.strip()
 
-        if _comeback_body_ok(generated):
+        if generated in COMEBACK_LINES or _comeback_body_ok(generated):
             return generated
 
     return pick_comeback()
