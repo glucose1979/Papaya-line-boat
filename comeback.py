@@ -1,13 +1,17 @@
 """Group-chat comeback mode for the LINE bot.
 
 In a group, a message from the display name "Hung Chang Chen" that
-insults the bot, the AI, or its replies gets one short reply. Keyword
-hits reply immediately. Any other non-empty text from that sender, up
-to CLASSIFY_MAX_CHARS, is classified by meaning. Other senders are
-never classified. A triggered reply is written for that message and
-kept to COMEBACK_MAX_BODY_CHARS characters; a failure uses one of the
-fixed lines. The reply uses the webhook reply token. Push is never
-used.
+insults or mocks the bot gets one short reply. A bare insult, an
+appearance jab, an intelligence jab, or a sexual-function jab from
+that sender counts even when it never names the bot. Keyword hits
+reply immediately. Any other non-empty text from that sender, up to
+CLASSIFY_MAX_CHARS, is classified by meaning. Other senders are never
+classified. A triggered reply is written for that message. A fixed
+line is used only when it fits that insult; otherwise the body is a
+new line kept to COMEBACK_MAX_BODY_CHARS characters. A failure uses
+one of the fixed lines. The reply uses the webhook reply token. Push
+is never used. Each group remembers the last few reply bodies so the
+next comeback does not repeat them.
 
 The group named 自動回覆訓練區 is the exception: any sender counts,
 and the reply prefix uses that sender's display name. The group name
@@ -15,9 +19,10 @@ comes from LINE Get group summary and is cached per group id.
 
 The on/off switch starts from COMEBACK_MODE (default on). The owner
 can flip that same global switch from the 1:1 private chat or from a
-group. A process restart drops the override and the display-name
-cache, then starts from the env default again. Render's one-worker
-gunicorn process is the intended setup.
+group. A process restart drops the override, the display-name
+cache, the group-name cache, and the per-group reply history, then
+starts from the env default again. Render's one-worker gunicorn
+process is the intended setup.
 """
 
 import json
@@ -35,7 +40,9 @@ CLASSIFY_MODEL_DEFAULT = "gpt-4o-mini"
 CLASSIFY_TIMEOUT_SECONDS = 8
 CLASSIFY_MAX_CHARS = 300
 REPLY_MODEL_DEFAULT = "gpt-4o-mini"
+REPLY_TEMPERATURE = 1.0
 COMEBACK_MAX_BODY_CHARS = 10
+RECENT_REPLY_LIMIT = 5
 
 TOGGLE_ON_TEXT = "吵架模式開"
 TOGGLE_OFF_TEXT = "吵架模式關"
@@ -78,16 +85,20 @@ REPLY_FORBIDDEN = (
 )
 
 REPLY_INSTRUCTIONS = (
-    "你是群組裡的機器人「木瓜姐」。對方剛剛侮辱、嘲諷或貶低你、"
-    "AI、機器人或你的回覆。\n"
-    "先判斷下面哪一句在邏輯上最貼切。貼切就選那一句的編號。"
-    "九句都不貼切，才自己寫一句。\n"
+    "你是群組裡的機器人「木瓜姐」。對方剛剛侮辱、嘲諷或貶低你。"
+    "沒有點名也算在罵你。\n"
+    "只有某一句真的很貼這句特定的嘲諷，才選它的編號。"
+    "泛用、跟這幾個字對不上的，不要選。\n"
+    "對不上就自己寫一句，扣住對方剛用的那幾個字來挖苦，"
+    "每次換一種說法，不要跟最近用過的句子一樣。\n"
     "只輸出一個 JSON，不要加敬告、名字、前言或解釋：\n"
-    '{"choice": 1, "text": ""}\n'
-    "choice 是 1 到 9：用該句，text 留空。\n"
-    "choice 是 0：九句都不行，text 寫新的回嘴，最多 10 個字，標點也算。\n"
+    '{"choice": 0, "text": ""}\n'
+    "choice 是 1 到 9：那一句真的很貼，text 留空。\n"
+    "choice 是 0：自己寫。text 最多 10 個字，標點也算。\n"
     "可以刻薄、挖苦、諷刺。禁止髒話、詛咒、威脅、色情、歧視，"
-    "也禁止辱罵家人、外貌、殘疾或族群。\n"
+    "也禁止辱罵家人、外貌、殘疾或族群。"
+    "對方罵外貌或性功能時，不要把那些字原樣寫回去，"
+    "也不要寫露骨的性內容，換個角度挖苦。\n"
     "九句是：\n"
 )
 
@@ -303,12 +314,13 @@ CLASSIFY_INSTRUCTIONS = (
     "下面這種意思要回答 yes："
     "垃圾AI、垃圾垃圾回覆、木瓜姊好爛、機器人真的很蠢、"
     "AI的回答有夠廢、這台機器人在亂講、回得什麼鬼、人工智障、問了也是白問。\n"
+    "這則已經是會被回的人說的。沒有點名機器人也算在罵木瓜姊。"
+    "光罵人、罵外貌、罵智商、拿性功能來嘲，都要回答 yes："
+    "醜八怪、你性功能障礙、白癡、大白癡、低能兒、胸大無腦、白癡加三級。\n"
     "若訊息開頭標了「（這則是回覆訊息）」，代表這則是直接回這隻機器人。"
     "這種情況下，很短的不屑、嘲弄或否定也要回答 yes，"
     "例如：呵呵、好爛、廢物、亂講、無言、白問。\n"
-    "沒有那個標記時，短句如果看不出是在罵這隻機器人、AI、機器人或回覆，回答 no。\n"
-    "稱讚、提問、閒聊、討論別的主題、垃圾分類、垃圾車，"
-    "以及沒有針對這隻機器人／AI／機器人／回覆的話，回答 no。\n"
+    "稱讚、提問、閒聊、討論別的主題、垃圾分類、垃圾車，回答 no。\n"
     "不確定就回答 no。"
 )
 
@@ -366,6 +378,7 @@ _TARGET_RE = re.compile(_target_pattern() + r"|人工智障")
 
 _enabled_override = None
 _state_lock = threading.Lock()
+_recent_replies = {}
 
 _names = {}
 _name_lock = threading.Lock()
@@ -638,16 +651,77 @@ def reset_comeback_state():
 
     with _state_lock:
         _enabled_override = None
+        _recent_replies.clear()
 
     clear_display_name_cache()
     clear_group_name_cache()
 
 
-def pick_comeback(rng=None):
+def recent_replies(group_id):
+
+    if not isinstance(group_id, str) or group_id == "":
+        return ()
+
+    with _state_lock:
+        return tuple(_recent_replies.get(group_id, ()))
+
+
+def remember_reply(group_id, body):
+
+    if not isinstance(group_id, str) or group_id == "":
+        return
+
+    if not isinstance(body, str):
+        return
+
+    body = body.strip()
+
+    if not body:
+        return
+
+    with _state_lock:
+
+        history = list(_recent_replies.get(group_id, ()))
+        history.append(body)
+        _recent_replies[group_id] = history[-RECENT_REPLY_LIMIT:]
+
+
+def _avoid_tuple(avoid):
+
+    if not avoid:
+        return ()
+
+    if isinstance(avoid, str):
+        return (avoid,)
+
+    found = []
+
+    for item in avoid:
+
+        if isinstance(item, str) and item and item not in found:
+            found.append(item)
+
+    return tuple(found)
+
+
+def _avoid_set(avoid):
+
+    return set(_avoid_tuple(avoid))
+
+
+def pick_comeback(rng=None, avoid=()):
 
     choose = random.choice if rng is None else rng.choice
+    blocked = _avoid_set(avoid)
+    pool = tuple(
+        line for line in COMEBACK_LINES
+        if line not in blocked
+    )
 
-    return choose(COMEBACK_LINES)
+    if not pool:
+        pool = COMEBACK_LINES
+
+    return choose(pool)
 
 
 def format_group_comeback(line):
@@ -1035,7 +1109,7 @@ def _finish_comeback_body(text):
     return ""
 
 
-def _reply_input(text, quoted, previous):
+def _reply_input(text, quoted, previous, avoid=()):
 
     body = (text or "").strip()[:CLASSIFY_MAX_CHARS]
 
@@ -1043,11 +1117,20 @@ def _reply_input(text, quoted, previous):
         body = "（這則是回覆訊息）\n" + body
 
     prompt = "對方剛說：\n" + body
+    blocked = [
+        item for item in avoid
+        if isinstance(item, str) and item
+    ]
+
+    if blocked:
+
+        shown = "\n".join(blocked[-RECENT_REPLY_LIMIT:])
+        prompt += "\n\n最近用過、不要再用：\n" + shown
 
     if previous:
 
         prompt += (
-            "\n\n上一句超過 10 個字或不合格，不要再用："
+            "\n\n上一句不合格或跟禁用句重複，不要再用："
             + previous[:40]
             + "\n請改成 10 個字以內的一句。"
         )
@@ -1055,14 +1138,15 @@ def _reply_input(text, quoted, previous):
     return prompt
 
 
-def _request_comeback(openai_client, text, quoted, previous):
+def _request_comeback(openai_client, text, quoted, previous, avoid=()):
 
     model = _reply_model()
     kwargs = {
         "model": model,
         "instructions": _reply_instructions(),
-        "input": _reply_input(text, quoted, previous),
+        "input": _reply_input(text, quoted, previous, avoid),
         "max_output_tokens": 64,
+        "temperature": REPLY_TEMPERATURE,
         "timeout": CLASSIFY_TIMEOUT_SECONDS,
     }
 
@@ -1132,9 +1216,11 @@ def _plain_reply_text(raw):
     return prepare_comeback_body(raw)
 
 
-def _read_reply(raw):
+def _read_reply(raw, avoid=()):
 
+    blocked = _avoid_set(avoid)
     payload = _parse_reply_payload(raw)
+    text = _plain_reply_text(raw)
 
     if payload is not None:
 
@@ -1144,17 +1230,36 @@ def _read_reply(raw):
             number is not None
             and 1 <= number <= len(COMEBACK_LINES)
         ):
-            return COMEBACK_LINES[number - 1], ""
 
-    text = _plain_reply_text(raw)
+            line = COMEBACK_LINES[number - 1]
 
-    if _comeback_body_ok(text):
+            if line not in blocked:
+                return line, ""
+
+            if _comeback_body_ok(text) and text not in blocked:
+                return text, ""
+
+            return "", line
+
+    if _comeback_body_ok(text) and text not in blocked:
         return text, ""
 
     return "", text or "不合格"
 
 
-def generate_comeback(openai_client, text, quoted=False):
+def _accept_finished(text, avoid):
+
+    finished = _finish_comeback_body(text)
+
+    if finished and finished not in _avoid_set(avoid):
+        return finished
+
+    return ""
+
+
+def generate_comeback(openai_client, text, quoted=False, avoid=()):
+
+    blocked = _avoid_tuple(avoid)
 
     try:
 
@@ -1163,6 +1268,7 @@ def generate_comeback(openai_client, text, quoted=False):
             text,
             quoted,
             None,
+            blocked,
         )
 
     except Exception as exc:
@@ -1174,7 +1280,7 @@ def generate_comeback(openai_client, text, quoted=False):
 
         return ""
 
-    chosen, hint = _read_reply(first_raw)
+    chosen, hint = _read_reply(first_raw, blocked)
 
     if chosen:
         return chosen
@@ -1186,6 +1292,7 @@ def generate_comeback(openai_client, text, quoted=False):
             text,
             quoted,
             hint,
+            blocked,
         )
 
     except Exception as exc:
@@ -1195,22 +1302,22 @@ def generate_comeback(openai_client, text, quoted=False):
             type(exc).__name__
         )
 
-        return _finish_comeback_body(_plain_reply_text(first_raw))
+        return _accept_finished(_plain_reply_text(first_raw), blocked)
 
-    chosen, _hint = _read_reply(second_raw)
+    chosen, _hint = _read_reply(second_raw, blocked)
 
     if chosen:
         return chosen
 
-    finished = _finish_comeback_body(_plain_reply_text(second_raw))
+    finished = _accept_finished(_plain_reply_text(second_raw), blocked)
 
     if finished:
         return finished
 
-    return _finish_comeback_body(_plain_reply_text(first_raw))
+    return _accept_finished(_plain_reply_text(first_raw), blocked)
 
 
-def _comeback_line(text, quoted, generate):
+def _comeback_line(text, quoted, generate, group_id=""):
 
     if generate is not None:
 
@@ -1233,7 +1340,7 @@ def _comeback_line(text, quoted, generate):
         if generated in COMEBACK_LINES or _comeback_body_ok(generated):
             return generated
 
-    return pick_comeback()
+    return pick_comeback(avoid=recent_replies(group_id))
 
 
 def _toggle_allowed(user_id, owner_user_id):
@@ -1325,6 +1432,8 @@ def handle_group_text(
         else:
             reply(format_group_comeback(PROFANITY_REPLY))
 
+        remember_reply(group_id, PROFANITY_REPLY)
+
         return "profanity"
 
     if not strong:
@@ -1347,11 +1456,13 @@ def handle_group_text(
         if not insulting:
             return "not_insult"
 
-    line = _comeback_line(stripped, quoted, generate)
+    line = _comeback_line(stripped, quoted, generate, group_id)
 
     if training:
         reply(format_training_comeback(line, name))
     else:
         reply(format_group_comeback(line))
+
+    remember_reply(group_id, line)
 
     return "comeback"

@@ -271,6 +271,20 @@ class MatcherTests(unittest.TestCase):
         self.assertIn("回覆訊息", comeback.CLASSIFY_INSTRUCTIONS)
         self.assertIn("垃圾分類", comeback.CLASSIFY_INSTRUCTIONS)
         self.assertIn("垃圾車", comeback.CLASSIFY_INSTRUCTIONS)
+        self.assertNotIn("沒有那個標記時", comeback.CLASSIFY_INSTRUCTIONS)
+        for phrase in (
+            "醜八怪",
+            "你性功能障礙",
+            "白癡",
+            "大白癡",
+            "低能兒",
+            "胸大無腦",
+            "白癡加三級",
+        ):
+            self.assertIn(phrase, comeback.CLASSIFY_INSTRUCTIONS)
+        self.assertIn("真的很貼", comeback.REPLY_INSTRUCTIONS)
+        self.assertIn("10", comeback.REPLY_INSTRUCTIONS)
+        self.assertIn("敬告", comeback.REPLY_INSTRUCTIONS)
 
     def test_display_name_ignores_case_and_extra_spaces(self):
         for name in (
@@ -375,6 +389,20 @@ class MatcherTests(unittest.TestCase):
         picked = {comeback.pick_comeback(rng) for _ in range(40)}
         self.assertGreater(len(picked), 1)
         self.assertTrue(picked <= set(comeback.COMEBACK_LINES))
+
+    def test_pick_skips_recent_lines_until_the_pool_is_empty(self):
+        kept = comeback.COMEBACK_LINES[0]
+        avoided = comeback.COMEBACK_LINES[1:]
+        rng = random.Random(0)
+        for _ in range(10):
+            self.assertEqual(
+                comeback.pick_comeback(rng, avoid=avoided),
+                kept,
+            )
+        self.assertIn(
+            comeback.pick_comeback(rng, avoid=comeback.COMEBACK_LINES),
+            comeback.COMEBACK_LINES,
+        )
 
     def test_display_name_cache_expires(self):
         calls = []
@@ -998,6 +1026,92 @@ class HandleTests(unittest.TestCase):
         self.assertEqual(len(self.lookups), lookups_before)
         self.assertEqual(seen, [])
 
+    def test_bare_personal_insults_go_to_the_classifier(self):
+        self.names = {
+            "Uhung": "Hung Chang Chen",
+            "Uother": "Someone Else",
+        }
+        for text in (
+            "醜八怪",
+            "你性功能障礙",
+            "白癡",
+            "大白癡",
+            "低能兒",
+            "胸大無腦",
+            "白癡加三級",
+            "低能兒 胸大無腦",
+        ):
+            self.assertFalse(comeback.is_insult(text), text)
+            self.assertFalse(comeback.is_profanity(text), text)
+            self.assertTrue(comeback.should_classify(text), text)
+
+        self.classify_result = True
+        result = self._handle(
+            "醜八怪",
+            generate=lambda text, quoted=False: "鏡子同意",
+        )
+
+        self.assertEqual(result, "comeback")
+        self.assertEqual(self.classified, ["醜八怪"])
+        self.assertEqual(
+            self.replies[0],
+            comeback.COMEBACK_PREFIX + "鏡子同意",
+        )
+        self.assertEqual(
+            comeback.recent_replies("Cgroup"),
+            ("鏡子同意",),
+        )
+
+        self.classify_result = False
+        self.classified.clear()
+        self.assertEqual(self._handle("你性功能障礙"), "not_insult")
+        self.assertEqual(self.classified, ["你性功能障礙"])
+        self.assertEqual(len(self.replies), 1)
+
+        self.classify_result = True
+        self.assertEqual(
+            self._handle("大白癡", "Uother"),
+            "not_target",
+        )
+        self.assertEqual(self.classified, ["你性功能障礙"])
+
+    def test_recent_replies_stay_per_group_and_reset(self):
+        for index in range(6):
+            comeback.remember_reply("Gone", str(index))
+        comeback.remember_reply("Gother", "別群")
+        comeback.remember_reply("", "不算")
+
+        self.assertEqual(
+            comeback.recent_replies("Gone"),
+            ("1", "2", "3", "4", "5"),
+        )
+        self.assertEqual(comeback.recent_replies("Gother"), ("別群",))
+        self.assertEqual(comeback.recent_replies(""), ())
+
+        comeback.reset_comeback_state()
+
+        self.assertEqual(comeback.recent_replies("Gone"), ())
+        self.assertEqual(comeback.recent_replies("Gother"), ())
+
+    def test_profanity_still_repeats_when_it_was_just_used(self):
+        self.names = {"Uhung": "Hung Chang Chen"}
+        comeback.remember_reply("Cgroup", comeback.PROFANITY_REPLY)
+
+        result = self._handle(
+            "操你媽",
+            generate=lambda text, quoted=False: "就這水準？",
+        )
+
+        self.assertEqual(result, "profanity")
+        self.assertEqual(
+            self.replies,
+            [comeback.COMEBACK_PREFIX + comeback.PROFANITY_REPLY],
+        )
+        self.assertEqual(
+            comeback.recent_replies("Cgroup")[-1],
+            comeback.PROFANITY_REPLY,
+        )
+
     def test_chosen_fixed_line_is_not_cut_to_ten_characters(self):
         self.names = {"Uhung": "Hung Chang Chen"}
         self.classify_result = False
@@ -1215,6 +1329,67 @@ class GenerateTests(unittest.TestCase):
         self.assertEqual(len(seen), 2)
         self.assertIn("（這則是回覆訊息）", seen[1]["input"])
         self.assertIn("10 個字以內", seen[1]["input"])
+
+    def test_reply_call_uses_temperature_one(self):
+        client, seen = self._client(['{"choice": 0, "text": "就這句。"}'])
+
+        comeback.generate_comeback(client, "醜八怪")
+
+        self.assertEqual(seen[0]["temperature"], 1.0)
+        self.assertNotIn("reasoning", seen[0])
+
+    def test_recent_fixed_line_is_not_reused(self):
+        line = comeback.COMEBACK_LINES[6]
+        client, seen = self._client([
+            '{"choice": 7, "text": "鏡子同意"}',
+        ])
+
+        body = comeback.generate_comeback(
+            client,
+            "醜八怪",
+            avoid=[line],
+        )
+
+        self.assertEqual(body, "鏡子同意")
+        self.assertNotEqual(body, line)
+        self.assertEqual(len(seen), 1)
+        self.assertIn("最近用過、不要再用：\n" + line, seen[0]["input"])
+        self.assertEqual(seen[0]["temperature"], 1.0)
+
+    def test_repeated_choice_without_a_fresh_line_is_rejected(self):
+        line = comeback.COMEBACK_LINES[6]
+        client, seen = self._client([
+            '{"choice": 7, "text": ""}',
+            '{"choice": 7, "text": ""}',
+        ])
+
+        self.assertEqual(
+            comeback.generate_comeback(client, "大白癡", avoid=(line,)),
+            "",
+        )
+        self.assertEqual(len(seen), 2)
+        self.assertIn(line, seen[0]["input"])
+        self.assertIn(line, seen[1]["input"])
+        self.assertIn("10 個字以內", seen[1]["input"])
+
+    def test_repeated_free_text_retries_then_uses_a_new_line(self):
+        client, seen = self._client([
+            "就這水準？",
+            "換句話說。",
+        ])
+
+        body = comeback.generate_comeback(
+            client,
+            "低能兒",
+            avoid=["就這水準？", "連 AI 都懶得跟你計較，你自己品味一下。"],
+        )
+
+        self.assertEqual(body, "換句話說。")
+        self.assertEqual(len(seen), 2)
+        self.assertIn(
+            "就這水準？\n連 AI 都懶得跟你計較，你自己品味一下。",
+            seen[0]["input"],
+        )
 
 
 class FakeHttpResponse:
@@ -1800,6 +1975,7 @@ class WebhookTests(unittest.TestCase):
             "敬告 Hung Chang Chen：就這水準？",
         )
         self.assertEqual(self.calls[0]["model"], "gpt-4o-mini")
+        self.assertEqual(self.calls[0]["temperature"], 1.0)
         self.assertIn("垃圾AI", self.calls[0]["input"])
 
         self.group_names["Ctrain"] = "自動回覆訓練區"
@@ -1850,6 +2026,11 @@ class WebhookTests(unittest.TestCase):
             )
         )
 
+        self.assertEqual(len(self.calls), 3)
+        self.assertIn(
+            "最近用過、不要再用：\n一二三四五六七八九",
+            self.calls[-1]["input"],
+        )
         self.assertEqual(failed.status_code, 200)
         sent = self.posts[-1]["json"]["messages"][0]["text"]
         self.assertTrue(sent.startswith(comeback.COMEBACK_PREFIX))
