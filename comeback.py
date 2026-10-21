@@ -4,8 +4,10 @@ In a group, a message from the display name "Hung Chang Chen" that
 insults the bot, the AI, or its replies gets one short reply. Keyword
 hits reply immediately. Any other non-empty text from that sender, up
 to CLASSIFY_MAX_CHARS, is classified by meaning. Other senders are
-never classified. The reply uses the webhook reply token. Push is
-never used.
+never classified. A triggered reply is written for that message and
+kept to COMEBACK_MAX_BODY_CHARS characters; a failure uses one of the
+fixed lines. The reply uses the webhook reply token. Push is never
+used.
 
 The group named 自動回覆訓練區 is the exception: any sender counts,
 and the reply prefix uses that sender's display name. The group name
@@ -31,6 +33,8 @@ DISPLAY_NAME_TTL_SECONDS = 12 * 60 * 60
 CLASSIFY_MODEL_DEFAULT = "gpt-4o-mini"
 CLASSIFY_TIMEOUT_SECONDS = 8
 CLASSIFY_MAX_CHARS = 300
+REPLY_MODEL_DEFAULT = "gpt-4o-mini"
+COMEBACK_MAX_BODY_CHARS = 10
 
 TOGGLE_ON_TEXT = "吵架模式開"
 TOGGLE_OFF_TEXT = "吵架模式關"
@@ -41,6 +45,49 @@ STATUS_ON_REPLY = "吵架模式現在是開的。"
 STATUS_OFF_REPLY = "吵架模式現在是關的。"
 COMEBACK_PREFIX = "敬告 Hung Chang Chen："
 TRAINING_GROUP_NAME = "自動回覆訓練區"
+
+# The generated body is checked again in code. Fixed fallback lines
+# are not passed through this list.
+REPLY_FORBIDDEN = (
+    "幹",
+    "媽",
+    "娘",
+    "爸",
+    "死",
+    "殺",
+    "殘",
+    "智障",
+    "腦殘",
+    "白痴",
+    "白癡",
+    "醜",
+    "肥",
+    "矮",
+    "胖",
+    "尻",
+    "婊",
+    "淫",
+    "操",
+    "靠腰",
+    "屎",
+    "fuck",
+    "shit",
+    "bitch",
+)
+
+REPLY_INSTRUCTIONS = (
+    "你是群組裡的機器人「木瓜姐」。對方剛剛侮辱、嘲諷或貶低你、"
+    "AI、機器人或你的回覆。請針對他剛說的那句話，回一句尖銳、"
+    "諷刺、不留情的回嘴。\n"
+    "規則：\n"
+    "1. 只輸出回嘴正文。不要加「敬告」、名字、引號、前言或解釋。\n"
+    "2. 正文最多 10 個字，標點也算。超過 10 個字就重寫到 10 個字以內。\n"
+    "3. 用繁體中文，要接他的用詞回，不要拿固定套話敷衍。\n"
+    "4. 可以刻薄、挖苦、諷刺。禁止髒話、詛咒、威脅、色情、歧視，"
+    "也禁止辱罵家人、外貌、殘疾或族群。"
+    "不要用幹、操、媽、死、殺、智障、白痴這類字。\n"
+    "5. 不要空白。不確定也回一句短的。"
+)
 
 # Short game-banter. No slurs, no family profanity, no appearance,
 # disability, ethnicity, or sex, and no threats.
@@ -760,6 +807,234 @@ def classify_insult(openai_client, text, quoted=False):
     return _answer_is_yes(answer)
 
 
+def _reply_model():
+
+    model = (os.environ.get("COMEBACK_REPLY_MODEL") or "").strip()
+
+    return model or REPLY_MODEL_DEFAULT
+
+
+def prepare_comeback_body(raw):
+
+    if not isinstance(raw, str):
+        return ""
+
+    text = ""
+
+    for line in raw.splitlines():
+
+        line = line.strip()
+
+        if line:
+            text = line
+            break
+
+    if not text:
+        return ""
+
+    quotes = "\"'「」『』“”‘’"
+
+    while (
+        len(text) >= 2
+        and text[0] in quotes
+        and text[-1] in quotes
+    ):
+        text = text[1:-1].strip()
+
+    if text.startswith("敬告"):
+
+        for separator in ("：", ":"):
+
+            if separator in text:
+                text = text.split(separator, 1)[1].strip()
+                break
+
+    while (
+        len(text) >= 2
+        and text[0] in quotes
+        and text[-1] in quotes
+    ):
+        text = text[1:-1].strip()
+
+    return text.strip()
+
+
+def comeback_body_forbidden(text):
+
+    if not isinstance(text, str) or not text:
+        return False
+
+    lowered = text.lower()
+
+    return any(
+        word in text or word in lowered
+        for word in REPLY_FORBIDDEN
+    )
+
+
+def truncate_comeback_body(text):
+
+    if not isinstance(text, str):
+        return ""
+
+    if len(text) <= COMEBACK_MAX_BODY_CHARS:
+        return text
+
+    trimmed = text[:COMEBACK_MAX_BODY_CHARS].rstrip(
+        " \t，,、。.!！?？~～…"
+    )
+
+    return trimmed
+
+
+def _comeback_body_ok(text):
+
+    return (
+        isinstance(text, str)
+        and bool(text)
+        and len(text) <= COMEBACK_MAX_BODY_CHARS
+        and not comeback_body_forbidden(text)
+    )
+
+
+def _finish_comeback_body(text):
+
+    if not text or comeback_body_forbidden(text):
+        return ""
+
+    if len(text) <= COMEBACK_MAX_BODY_CHARS:
+        return text
+
+    trimmed = truncate_comeback_body(text)
+
+    if _comeback_body_ok(trimmed):
+        return trimmed
+
+    return ""
+
+
+def _reply_input(text, quoted, previous):
+
+    body = (text or "").strip()[:CLASSIFY_MAX_CHARS]
+
+    if quoted:
+        body = "（這則是回覆訊息）\n" + body
+
+    prompt = "對方剛說：\n" + body
+
+    if previous:
+
+        prompt += (
+            "\n\n上一句超過 10 個字或不合格，不要再用："
+            + previous[:40]
+            + "\n請改成 10 個字以內的一句。"
+        )
+
+    return prompt
+
+
+def _request_comeback(openai_client, text, quoted, previous):
+
+    model = _reply_model()
+    kwargs = {
+        "model": model,
+        "instructions": REPLY_INSTRUCTIONS,
+        "input": _reply_input(text, quoted, previous),
+        "max_output_tokens": 64,
+        "timeout": CLASSIFY_TIMEOUT_SECONDS,
+    }
+
+    if "gpt-5" in model:
+        kwargs["reasoning"] = {"effort": "minimal"}
+        kwargs["max_output_tokens"] = 200
+
+    response = openai_client.responses.create(**kwargs)
+
+    return getattr(response, "output_text", None) or ""
+
+
+def generate_comeback(openai_client, text, quoted=False):
+
+    try:
+
+        first_raw = _request_comeback(
+            openai_client,
+            text,
+            quoted,
+            None,
+        )
+
+    except Exception as exc:
+
+        print(
+            "Comeback reply error:",
+            type(exc).__name__
+        )
+
+        return ""
+
+    first = prepare_comeback_body(first_raw)
+
+    if _comeback_body_ok(first):
+        return first
+
+    try:
+
+        second_raw = _request_comeback(
+            openai_client,
+            text,
+            quoted,
+            first or prepare_comeback_body(first_raw) or first_raw,
+        )
+
+    except Exception as exc:
+
+        print(
+            "Comeback reply error:",
+            type(exc).__name__
+        )
+
+        return _finish_comeback_body(first)
+
+    second = prepare_comeback_body(second_raw)
+
+    if _comeback_body_ok(second):
+        return second
+
+    finished = _finish_comeback_body(second)
+
+    if finished:
+        return finished
+
+    return _finish_comeback_body(first)
+
+
+def _comeback_line(text, quoted, generate):
+
+    if generate is not None:
+
+        try:
+
+            generated = generate(text, quoted=bool(quoted))
+
+        except Exception as exc:
+
+            print(
+                "Comeback reply error:",
+                type(exc).__name__
+            )
+
+            generated = ""
+
+        if isinstance(generated, str):
+            generated = generated.strip()
+
+        if _comeback_body_ok(generated):
+            return generated
+
+    return pick_comeback()
+
+
 def _toggle_allowed(user_id, owner_user_id):
 
     if not isinstance(owner_user_id, str) or owner_user_id == "":
@@ -778,6 +1053,7 @@ def handle_group_text(
     owner_user_id,
     quoted=False,
     training=False,
+    generate=None,
 ):
 
     if not isinstance(text, str):
@@ -860,7 +1136,7 @@ def handle_group_text(
         if not insulting:
             return "not_insult"
 
-    line = pick_comeback()
+    line = _comeback_line(stripped, quoted, generate)
 
     if training:
         reply(format_training_comeback(line, name))
