@@ -412,6 +412,108 @@ class MatcherTests(unittest.TestCase):
         self.assertEqual(name, "Hung Chang Chen")
         self.assertEqual(len(calls), 2)
 
+    def test_group_summary_is_cached_per_group_id(self):
+        calls = []
+
+        class Response:
+
+            def __init__(self, group_id, group_name):
+                self._payload = {
+                    "groupId": group_id,
+                    "groupName": group_name,
+                }
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self._payload
+
+        def http_get(url, headers=None, timeout=None):
+            calls.append(url)
+            if url.endswith("/Ctrain/summary"):
+                return Response("Ctrain", "自動回覆訓練區")
+            return Response("Cother", "燒豬群")
+
+        first = comeback.get_group_summary(
+            "Ctrain",
+            http_get,
+            "tok",
+            now=100,
+        )
+        second = comeback.get_group_summary(
+            "Ctrain",
+            http_get,
+            "tok",
+            now=100 + 10,
+        )
+        other = comeback.get_group_summary(
+            "Cother",
+            http_get,
+            "tok",
+            now=100 + 10,
+        )
+        expired = comeback.get_group_summary(
+            "Ctrain",
+            http_get,
+            "tok",
+            now=100 + comeback.DISPLAY_NAME_TTL_SECONDS + 1,
+        )
+
+        self.assertEqual(first.groupName, "自動回覆訓練區")
+        self.assertTrue(comeback.is_training_group(first.groupName))
+        self.assertEqual(second.groupName, first.groupName)
+        self.assertEqual(other.groupName, "燒豬群")
+        self.assertFalse(comeback.is_training_group(other.groupName))
+        self.assertFalse(comeback.is_training_group("自動回覆訓練區 "))
+        self.assertEqual(expired.groupName, "自動回覆訓練區")
+        self.assertEqual(
+            calls,
+            [
+                "https://api.line.me/v2/bot/group/Ctrain/summary",
+                "https://api.line.me/v2/bot/group/Cother/summary",
+                "https://api.line.me/v2/bot/group/Ctrain/summary",
+            ],
+        )
+        self.assertEqual(
+            calls[0],
+            "https://api.line.me/v2/bot/group/Ctrain/summary",
+        )
+
+        comeback.reset_comeback_state()
+        self.assertIsNone(comeback.get_cached_group_name("Ctrain"))
+
+    def test_group_summary_failure_is_not_cached(self):
+        calls = []
+
+        class Ok:
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "groupId": "Ctrain",
+                    "groupName": "自動回覆訓練區",
+                }
+
+        def http_get(url, headers=None, timeout=None):
+            calls.append(url)
+            if len(calls) == 1:
+                raise RuntimeError("down")
+            return Ok()
+
+        with self.assertRaises(RuntimeError):
+            comeback.get_group_summary("Ctrain", http_get, "tok")
+
+        summary = comeback.get_group_summary("Ctrain", http_get, "tok")
+
+        self.assertEqual(summary.groupName, "自動回覆訓練區")
+        self.assertEqual(len(calls), 2)
+        empty = comeback.get_group_summary("", http_get, "tok")
+        self.assertEqual(empty.groupName, "")
+        self.assertEqual(len(calls), 2)
+
     def test_classify_yes_no_and_errors(self):
         seen = {}
 
@@ -499,7 +601,14 @@ class HandleTests(unittest.TestCase):
         self.quoted_flags.append(bool(quoted))
         return self.classify_result
 
-    def _handle(self, text, user_id="Uhung", owner="Uowner", quoted=False):
+    def _handle(
+        self,
+        text,
+        user_id="Uhung",
+        owner="Uowner",
+        quoted=False,
+        training=False,
+    ):
         return comeback.handle_group_text(
             text,
             user_id,
@@ -509,6 +618,7 @@ class HandleTests(unittest.TestCase):
             self._classify,
             owner,
             quoted=quoted,
+            training=training,
         )
 
     def test_strong_insult_from_target_replies_once(self):
@@ -628,6 +738,49 @@ class HandleTests(unittest.TestCase):
         self.assertEqual(self._handle("問了也是白問"), "disabled")
         self.assertEqual(self.lookups, [])
         self.assertEqual(self.classified, [])
+
+    def test_training_group_counts_any_sender_and_uses_their_name(self):
+        self.names = {
+            "Uowner": "侯鎮邦",
+            "Uother": "Someone Else",
+        }
+        self.classify_result = True
+
+        result = self._handle("垃圾AI", "Uowner", training=True)
+
+        self.assertEqual(result, "comeback")
+        self.assertEqual(self.classified, [])
+        prefix = "敬告 侯鎮邦："
+        self.assertEqual(ord(prefix[-1]), 0xFF1A)
+        self.assertNotIn(":", prefix)
+        self.assertTrue(self.replies[0].startswith(prefix))
+        self.assertFalse(
+            self.replies[0].startswith(comeback.COMEBACK_PREFIX)
+        )
+        self.assertIn(
+            self.replies[0][len(prefix):],
+            comeback.COMEBACK_LINES,
+        )
+
+        self.assertEqual(
+            self._handle("問了也是白問", "Uother", training=True),
+            "comeback",
+        )
+        self.assertEqual(self.classified, ["問了也是白問"])
+        self.assertTrue(self.replies[-1].startswith("敬告 Someone Else："))
+
+        self.classified.clear()
+        self.assertEqual(
+            self._handle("垃圾AI", "Uowner", training=False),
+            "not_target",
+        )
+        self.assertEqual(self.classified, [])
+
+        self.assertEqual(
+            self._handle("吵架模式狀態", "Uowner", training=True),
+            "status_on",
+        )
+        self.assertEqual(self.replies[-1], comeback.STATUS_ON_REPLY)
 
     def test_owner_toggles_and_restart_uses_env_again(self):
         self.names = {"Uhung": "Hung Chang Chen"}
@@ -750,6 +903,7 @@ class WebhookTests(unittest.TestCase):
         self.gets = []
         self._scripted = []
         self.names = {"Uhung": "Hung Chang Chen"}
+        self.group_names = {}
         self._original_create = app.client.responses.create
         self._original_post = app.requests.post
         self._original_get = app.requests.get
@@ -788,10 +942,22 @@ class WebhookTests(unittest.TestCase):
             "headers": headers,
             "timeout": timeout,
         })
+        if url.rstrip("/").endswith("/summary"):
+            group_id = url.rstrip("/").rsplit("/", 2)[-2]
+            return FakeHttpResponse({
+                "groupId": group_id,
+                "groupName": self.group_names.get(group_id, ""),
+            })
         user_id = url.rstrip("/").rsplit("/", 1)[-1]
         return FakeHttpResponse({
             "displayName": self.names.get(user_id, ""),
         })
+
+    def _member_gets(self):
+        return [
+            item for item in self.gets
+            if "/member/" in item["url"]
+        ]
 
     def _sign(self, body):
         digest = hmac.new(
@@ -847,13 +1013,13 @@ class WebhookTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.calls, [])
-        self.assertEqual(len(self.gets), 1)
+        self.assertEqual(len(self._member_gets()), 1)
         self.assertEqual(
-            self.gets[0]["url"],
+            self._member_gets()[0]["url"],
             "https://api.line.me/v2/bot/group/Cgroup/member/Uhung",
         )
         self.assertEqual(
-            self.gets[0]["headers"]["Authorization"],
+            self._member_gets()[0]["headers"]["Authorization"],
             "Bearer test-token",
         )
         self.assertEqual(len(self.posts), 1)
@@ -885,7 +1051,7 @@ class WebhookTests(unittest.TestCase):
             )
         )
         self.assertEqual(again.status_code, 200)
-        self.assertEqual(len(self.gets), 1)
+        self.assertEqual(len(self.gets), 2)
         self.assertEqual(len(self.posts), 2)
 
     def test_wrong_name_and_plain_group_text_stay_silent(self):
@@ -918,7 +1084,14 @@ class WebhookTests(unittest.TestCase):
         self.assertEqual(send.status_code, 200)
         self.assertEqual(self.posts, [])
         self.assertEqual(self.calls, [])
-        self.assertEqual(len(self.gets), 2)
+        self.assertEqual(len(self._member_gets()), 2)
+        self.assertEqual(
+            len([
+                item for item in self.gets
+                if item["url"].endswith("/summary")
+            ]),
+            1,
+        )
 
     def test_owner_toggle_and_private_chat_still_chat(self):
         off = self._post_event(
@@ -944,7 +1117,7 @@ class WebhookTests(unittest.TestCase):
         )
         self.assertEqual(blocked.status_code, 200)
         self.assertEqual(len(self.posts), 1)
-        self.assertEqual(self.gets, [])
+        self.assertEqual(self._member_gets(), [])
 
         stranger = self._post_event(
             self._text_event(
@@ -998,7 +1171,7 @@ class WebhookTests(unittest.TestCase):
         )
         self.assertEqual(blocked.status_code, 200)
         self.assertEqual(len(self.posts), 1)
-        self.assertEqual(self.gets, [])
+        self.assertEqual(self._member_gets(), [])
 
         stranger = self._post_event(
             self._text_event(
@@ -1041,7 +1214,7 @@ class WebhookTests(unittest.TestCase):
         )
         self.assertNotEqual(sent, comeback.TOGGLE_ON_REPLY)
         self.assertNotEqual(sent, comeback.STATUS_ON_REPLY)
-        self.assertEqual(len(self.gets), 1)
+        self.assertEqual(len(self._member_gets()), 1)
 
     def test_status_replies_with_the_real_switch_and_skips_chat(self):
         private = self._post_event(self._text_event("吵架模式狀態"))
@@ -1084,7 +1257,7 @@ class WebhookTests(unittest.TestCase):
             "吵架模式現在是關的。",
         )
         self.assertEqual(self.calls, [])
-        self.assertEqual(self.gets, [])
+        self.assertEqual(self._member_gets(), [])
         self.assertFalse(comeback.comeback_enabled())
 
         before = len(self.posts)
@@ -1106,7 +1279,7 @@ class WebhookTests(unittest.TestCase):
         self.assertEqual(stranger_private.status_code, 200)
         self.assertEqual(len(self.posts), before)
         self.assertEqual(self.calls, [])
-        self.assertEqual(self.gets, [])
+        self.assertEqual(self._member_gets(), [])
         self.assertFalse(comeback.comeback_enabled())
 
     def test_profile_failure_still_returns_200(self):
@@ -1166,6 +1339,94 @@ class WebhookTests(unittest.TestCase):
         self.assertEqual(quiet.status_code, 200)
         self.assertEqual(len(self.calls), before_calls)
         self.assertEqual(len(self.posts), 1)
+
+    def test_training_group_uses_the_sender_name_and_logs_the_group(self):
+        self.group_names["Ctrain"] = "自動回覆訓練區"
+        self.names["Uowner"] = "侯鎮邦"
+        text = "垃圾AI"
+
+        with self.assertLogs("papaya.group", level="INFO") as captured:
+            spoken = self._post_event(
+                self._text_event(
+                    text,
+                    user_id="Uowner",
+                    source_type="group",
+                    group_id="Ctrain",
+                )
+            )
+            image = {
+                "type": "message",
+                "replyToken": "reply-token",
+                "source": {
+                    "type": "group",
+                    "userId": "Uowner",
+                    "groupId": "Ctrain",
+                },
+                "message": {
+                    "type": "image",
+                    "id": "img-secret",
+                },
+            }
+            quiet = self._post_event(image)
+
+        self.assertEqual(spoken.status_code, 200)
+        self.assertEqual(quiet.status_code, 200)
+        logged = "\n".join(captured.output)
+        self.assertEqual(logged.count("groupId=Ctrain"), 2)
+        self.assertEqual(logged.count("groupName=自動回覆訓練區"), 2)
+        self.assertNotIn(text, logged)
+        self.assertNotIn("img-secret", logged)
+        self.assertEqual(len(self.posts), 1)
+        sent = self.posts[0]["json"]["messages"][0]["text"]
+        self.assertTrue(sent.startswith("敬告 侯鎮邦："))
+        self.assertFalse(sent.startswith(comeback.COMEBACK_PREFIX))
+        self.assertIn(
+            sent[len("敬告 侯鎮邦："):],
+            comeback.COMEBACK_LINES,
+        )
+        self.assertEqual(
+            [
+                item["url"] for item in self.gets
+                if item["url"].endswith("/summary")
+            ],
+            ["https://api.line.me/v2/bot/group/Ctrain/summary"],
+        )
+        self.assertEqual(self.calls, [])
+
+    def test_other_named_group_still_ignores_other_senders(self):
+        self.group_names["Cpig"] = "燒豬群"
+        self.names["Uowner"] = "侯鎮邦"
+
+        response = self._post_event(
+            self._text_event(
+                "垃圾AI",
+                user_id="Uowner",
+                source_type="group",
+                group_id="Cpig",
+            )
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.posts, [])
+        self.assertEqual(self.calls, [])
+
+        self.names["Uhung"] = "Hung Chang Chen"
+        hit = self._post_event(
+            self._text_event(
+                "垃圾AI",
+                user_id="Uhung",
+                source_type="group",
+                group_id="Cpig",
+            )
+        )
+
+        self.assertEqual(hit.status_code, 200)
+        self.assertEqual(len(self.posts), 1)
+        self.assertTrue(
+            self.posts[0]["json"]["messages"][0]["text"].startswith(
+                comeback.COMEBACK_PREFIX
+            )
+        )
 
 
 if __name__ == "__main__":
