@@ -31,6 +31,7 @@ TOGGLE_OFF_REPLY = "吵架模式關了。"
 STATUS_TEXT = "吵架模式狀態"
 STATUS_ON_REPLY = "吵架模式現在是開的。"
 STATUS_OFF_REPLY = "吵架模式現在是關的。"
+COMEBACK_PREFIX = "敬告 Hung Chang Chen："
 
 # Short game-banter. No slurs, no family profanity, no appearance,
 # disability, ethnicity, or sex, and no threats.
@@ -450,6 +451,11 @@ def pick_comeback(rng=None):
     return choose(COMEBACK_LINES)
 
 
+def format_group_comeback(line):
+
+    return COMEBACK_PREFIX + line
+
+
 def get_cached_display_name(user_id, now=None):
 
     if not user_id:
@@ -695,6 +701,6 @@ def handle_group_text(
         if not insulting:
             return "not_insult"
 
-    reply(pick_comeback())
+    reply(format_group_comeback(pick_comeback()))
 
     return "comeback"

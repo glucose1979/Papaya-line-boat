@@ -40,6 +40,8 @@ Comeback lines:
 5. 垃圾進，垃圾出，公平。
 6. 這種話，只配這種回。
 
+The group reply is the line with `敬告 Hung Chang Chen：` in front. Toggle and status replies are not prefixed.
+
 ## Private AI proofreading (`POST /fix`)
 
 Used by the static dictation page at https://glucose1979.github.io/dictation/ .
