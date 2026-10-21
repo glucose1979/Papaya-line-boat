@@ -45,6 +45,7 @@ STATUS_ON_REPLY = "吵架模式現在是開的。"
 STATUS_OFF_REPLY = "吵架模式現在是關的。"
 COMEBACK_PREFIX = "敬告 Hung Chang Chen："
 TRAINING_GROUP_NAME = "自動回覆訓練區"
+PROFANITY_REPLY = "你自己操自己"
 
 # The generated body is checked again in code. Fixed fallback lines
 # are not passed through this list.
@@ -410,6 +411,116 @@ def normalize_insult_text(text):
     text = re.sub(r"\s+", "", text)
 
     return text
+
+
+_PROFANITY_NI = r"(?:你|妳|伱|尼|泥)"
+_PROFANITY_MA = r"(?:媽|妈|馬|马|瑪|玛|嘛|麻)"
+_PROFANITY_NIANG = r"(?:娘|孃)"
+_PROFANITY_HEAD = r"(?:操|肏|草|槽|糙|吵|曹|抄|幹|干|淦|乾)"
+_PROFANITY_FAMILY = (
+    rf"(?:{_PROFANITY_NI}(?:"
+    rf"{_PROFANITY_MA}|{_PROFANITY_NIANG}|家|老師|老师"
+    rf")|{_PROFANITY_NI})"
+)
+
+# Phrases, after spaces and symbols are removed. Longer family
+# targets are listed before a bare 你, so 幹你老師 still matches.
+_PROFANITY_PHRASE = re.compile(
+    rf"(?:{_PROFANITY_HEAD}{_PROFANITY_FAMILY}"
+    rf"|(?:添|舔){_PROFANITY_NI}{_PROFANITY_NIANG}"
+    rf"|x{_PROFANITY_NI}{_PROFANITY_NIANG}"
+    rf"|靠(?:北|杯|背|悲)"
+    rf"|(?<![a-z0-9])cnm(?![a-z0-9]))"
+)
+
+# 幹 / 淦 as an expletive. Benign compounds are removed first.
+_STANDALONE_GAN = re.compile(r"幹|淦")
+_BENIGN_GAN = tuple(sorted((
+    "幹部",
+    "干部",
+    "幹事",
+    "干事",
+    "幹活",
+    "干活",
+    "樹幹",
+    "树干",
+    "幹嘛",
+    "干嘛",
+    "幹嗎",
+    "干吗",
+    "幹麼",
+    "幹什麼",
+    "干什麼",
+    "干什么",
+    "若干",
+    "幹練",
+    "干练",
+    "幹勁",
+    "干劲",
+    "主幹",
+    "主干",
+    "幹道",
+    "干道",
+    "幹線",
+    "干线",
+    "骨幹",
+    "骨干",
+    "公幹",
+    "公干",
+    "幹校",
+    "干校",
+    "幹群",
+    "干群",
+    "幹警",
+    "干警",
+    "幹員",
+    "干员",
+    "幹淨",
+    "干净",
+), key=len, reverse=True))
+
+
+def _compact_profanity(text):
+
+    if not isinstance(text, str):
+        return ""
+
+    text = unicodedata.normalize("NFKC", text).lower()
+    text = re.sub(
+        r"(?<![0-9a-z\u4e00-\u9fff])[×✕✖*＊x](?=(?:你|妳|伱|尼|泥))",
+        "x",
+        text,
+    )
+    kept = []
+
+    for char in text:
+
+        if (
+            "\u4e00" <= char <= "\u9fff"
+            or "a" <= char <= "z"
+            or "0" <= char <= "9"
+        ):
+            kept.append(char)
+
+    return "".join(kept)
+
+
+def is_profanity(text):
+
+    compact = _compact_profanity(text)
+
+    if not compact:
+        return False
+
+    if _PROFANITY_PHRASE.search(compact):
+        return True
+
+    scrubbed = compact
+
+    for phrase in _BENIGN_GAN:
+        scrubbed = scrubbed.replace(phrase, "")
+
+    return _STANDALONE_GAN.search(scrubbed) is not None
 
 
 def is_insult(text):
@@ -1096,8 +1207,9 @@ def handle_group_text(
         return "disabled"
 
     strong = is_insult(stripped)
+    profane = is_profanity(stripped)
 
-    if not strong and not should_classify(stripped):
+    if not profane and not strong and not should_classify(stripped):
         return "ignore"
 
     try:
@@ -1115,6 +1227,15 @@ def handle_group_text(
 
     if not training and not is_target_sender(name):
         return "not_target"
+
+    if profane:
+
+        if training:
+            reply(format_training_comeback(PROFANITY_REPLY, name))
+        else:
+            reply(format_group_comeback(PROFANITY_REPLY))
+
+        return "profanity"
 
     if not strong:
 

@@ -165,6 +165,51 @@ class MatcherTests(unittest.TestCase):
         for text in _NOT_INSULTS:
             self.assertFalse(comeback.is_insult(text), text)
 
+    def test_profanity_matches_phrases_spaces_and_homophones(self):
+        for text in (
+            "操你媽",
+            "幹你娘",
+            "幹你老師",
+            "幹",
+            "靠北",
+            "靠杯",
+            "添你娘",
+            "X你娘",
+            "x你娘",
+            "操 你 媽",
+            "操-你-媽",
+            "操*你*媽",
+            "草你媽",
+            "淦你娘",
+            "干你老師",
+            "乾你娘",
+            "舔你娘",
+            "靠背",
+            "幹你",
+            "操你全家",
+            "幹！",
+            "ｃｎｍ",
+            "×你娘",
+            "*你娘",
+            "這群人幹",
+        ):
+            self.assertTrue(comeback.is_profanity(text), text)
+
+        for text in (
+            "大家好",
+            "垃圾AI",
+            "幹部來了",
+            "幹嘛",
+            "幹什麼",
+            "樹幹",
+            "若干人",
+            "你好",
+            "你娘",
+            None,
+            "",
+        ):
+            self.assertFalse(comeback.is_profanity(text), repr(text))
+
     def test_non_text_is_not_an_insult(self):
         self.assertFalse(comeback.is_insult(None))
         self.assertFalse(comeback.is_insult(""))
@@ -896,6 +941,62 @@ class HandleTests(unittest.TestCase):
             "status_on",
         )
         self.assertEqual(len(seen), before)
+
+    def test_profanity_uses_the_fixed_body_and_skips_the_model(self):
+        self.names = {
+            "Uhung": "Hung Chang Chen",
+            "Uowner": "侯鎮邦",
+            "Uother": "Someone Else",
+        }
+        self.classify_result = True
+        seen = []
+
+        def generate(text, quoted=False):
+            seen.append(text)
+            return "就這水準？"
+
+        result = self._handle("操你媽", generate=generate)
+
+        self.assertEqual(result, "profanity")
+        self.assertEqual(seen, [])
+        self.assertEqual(self.classified, [])
+        self.assertEqual(
+            self.replies[0],
+            comeback.COMEBACK_PREFIX + "你自己操自己",
+        )
+
+        self.assertEqual(
+            self._handle("幹你娘", "Uowner", training=True, generate=generate),
+            "profanity",
+        )
+        self.assertEqual(
+            self.replies[-1],
+            "敬告 侯鎮邦：你自己操自己",
+        )
+        self.assertEqual(seen, [])
+
+        self.assertEqual(
+            self._handle("靠北", "Uother", generate=generate),
+            "not_target",
+        )
+        self.assertEqual(seen, [])
+        self.assertEqual(self.replies, self.replies[:2])
+
+        self.assertEqual(
+            self._handle("幹" + ("喔" * 400), generate=generate),
+            "profanity",
+        )
+        self.assertEqual(seen, [])
+
+        self.replies.clear()
+        self.assertEqual(
+            self._handle("吵架模式關", "Uowner"),
+            "toggle_off",
+        )
+        lookups_before = len(self.lookups)
+        self.assertEqual(self._handle("幹", generate=generate), "disabled")
+        self.assertEqual(len(self.lookups), lookups_before)
+        self.assertEqual(seen, [])
 
     def test_bad_generation_falls_back_to_a_fixed_line(self):
         self.names = {"Uhung": "Hung Chang Chen"}
@@ -1686,6 +1787,52 @@ class WebhookTests(unittest.TestCase):
             sent[len(comeback.COMEBACK_PREFIX):],
             comeback.COMEBACK_LINES,
         )
+
+    def test_profanity_replies_without_calling_openai(self):
+        before = len(self.calls)
+        response = self._post_event(
+            self._text_event(
+                "操 你 媽",
+                user_id="Uhung",
+                source_type="group",
+            )
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(self.calls), before)
+        self.assertEqual(
+            self.posts[0]["json"]["messages"][0]["text"],
+            "敬告 Hung Chang Chen：你自己操自己",
+        )
+
+        self.names["Uother"] = "Other Person"
+        quiet = self._post_event(
+            self._text_event(
+                "幹你娘",
+                user_id="Uother",
+                source_type="group",
+            )
+        )
+        self.assertEqual(quiet.status_code, 200)
+        self.assertEqual(len(self.posts), 1)
+        self.assertEqual(len(self.calls), before)
+
+        self.group_names["Ctrain"] = "自動回覆訓練區"
+        self.names["Uowner"] = "侯鎮邦"
+        trained = self._post_event(
+            self._text_event(
+                "靠杯",
+                user_id="Uowner",
+                source_type="group",
+                group_id="Ctrain",
+            )
+        )
+        self.assertEqual(trained.status_code, 200)
+        self.assertEqual(
+            self.posts[-1]["json"]["messages"][0]["text"],
+            "敬告 侯鎮邦：你自己操自己",
+        )
+        self.assertEqual(len(self.calls), before)
 
 
 if __name__ == "__main__":
