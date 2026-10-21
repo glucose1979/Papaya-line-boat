@@ -39,6 +39,11 @@ Comeback lines:
 4. 水準在這，回覆就在這。
 5. 垃圾進，垃圾出，公平。
 6. 這種話，只配這種回。
+7. 連 AI 都懶得跟你計較，你自己品味一下。
+8. 你的見識，就跟你的發言一樣廉價。
+9. 罵得這麼用力，可惜沒半個人在聽。
+
+The group reply is the line with `敬告 Hung Chang Chen：` in front. Toggle and status replies are not prefixed.
 
 ## Private AI proofreading (`POST /fix`)
 

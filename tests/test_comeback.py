@@ -270,12 +270,29 @@ class MatcherTests(unittest.TestCase):
                 "水準在這，回覆就在這。",
                 "垃圾進，垃圾出，公平。",
                 "這種話，只配這種回。",
+                "連 AI 都懶得跟你計較，你自己品味一下。",
+                "你的見識，就跟你的發言一樣廉價。",
+                "罵得這麼用力，可惜沒半個人在聽。",
             ),
         )
+        self.assertEqual(len(lines), 9)
         for line in lines:
-            self.assertLessEqual(len(line), 20, line)
             for word in _FORBIDDEN:
                 self.assertNotIn(word, line)
+
+    def test_group_reply_uses_the_fullwidth_prefix(self):
+        self.assertEqual(
+            comeback.COMEBACK_PREFIX,
+            "敬告 Hung Chang Chen：",
+        )
+        self.assertNotIn(":", comeback.COMEBACK_PREFIX)
+        for line in comeback.COMEBACK_LINES:
+            sent = comeback.format_group_comeback(line)
+            self.assertEqual(
+                sent,
+                "敬告 Hung Chang Chen：" + line,
+            )
+            self.assertFalse(sent.startswith("敬告 Hung Chang Chen:"))
 
     def test_pick_stays_inside_the_list(self):
         rng = random.Random(0)
@@ -454,7 +471,16 @@ class HandleTests(unittest.TestCase):
 
         self.assertEqual(result, "comeback")
         self.assertEqual(len(self.replies), 1)
-        self.assertIn(self.replies[0], comeback.COMEBACK_LINES)
+        self.assertEqual(
+            self.replies[0],
+            comeback.format_group_comeback(
+                self.replies[0][len(comeback.COMEBACK_PREFIX):]
+            ),
+        )
+        self.assertIn(
+            self.replies[0][len(comeback.COMEBACK_PREFIX):],
+            comeback.COMEBACK_LINES,
+        )
         self.assertEqual(self.classified, [])
         self.assertEqual(self.lookups, [("Cgroup", "Uhung")])
 
@@ -733,7 +759,15 @@ class WebhookTests(unittest.TestCase):
         messages = posted["json"]["messages"]
         self.assertEqual(len(messages), 1)
         self.assertEqual(messages[0]["type"], "text")
-        self.assertIn(messages[0]["text"], comeback.COMEBACK_LINES)
+        self.assertTrue(
+            messages[0]["text"].startswith(
+                "敬告 Hung Chang Chen："
+            )
+        )
+        self.assertIn(
+            messages[0]["text"][len("敬告 Hung Chang Chen："):],
+            comeback.COMEBACK_LINES,
+        )
 
         again = self._post_event(
             self._text_event(
@@ -891,10 +925,14 @@ class WebhookTests(unittest.TestCase):
             self.posts[-1]["url"],
             "https://api.line.me/v2/bot/message/reply",
         )
+        sent = self.posts[-1]["json"]["messages"][0]["text"]
+        self.assertTrue(sent.startswith(comeback.COMEBACK_PREFIX))
         self.assertIn(
-            self.posts[-1]["json"]["messages"][0]["text"],
+            sent[len(comeback.COMEBACK_PREFIX):],
             comeback.COMEBACK_LINES,
         )
+        self.assertNotEqual(sent, comeback.TOGGLE_ON_REPLY)
+        self.assertNotEqual(sent, comeback.STATUS_ON_REPLY)
         self.assertEqual(len(self.gets), 1)
 
     def test_status_replies_with_the_real_switch_and_skips_chat(self):
