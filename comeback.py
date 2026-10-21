@@ -26,6 +26,7 @@ process is the intended setup.
 """
 
 import json
+import logging
 import os
 import random
 import re
@@ -43,6 +44,31 @@ REPLY_MODEL_DEFAULT = "gpt-4o-mini"
 REPLY_TEMPERATURE = 1.0
 COMEBACK_MAX_BODY_CHARS = 10
 RECENT_REPLY_LIMIT = 5
+
+COMEBACK_LOGGER = logging.getLogger("papaya.comeback")
+COMEBACK_LOGGER.setLevel(logging.INFO)
+if not COMEBACK_LOGGER.handlers:
+    _comeback_log_handler = logging.StreamHandler()
+    _comeback_log_handler.setLevel(logging.INFO)
+    _comeback_log_handler.setFormatter(
+        logging.Formatter("%(levelname)s %(name)s %(message)s")
+    )
+    COMEBACK_LOGGER.addHandler(_comeback_log_handler)
+COMEBACK_LOGGER.propagate = False
+
+# Slurs and sexual-insult jabs. They trigger without the classifier
+# and without a nearby AI/機器人/回覆 word.
+BARE_INSULTS = (
+    "賤貨",
+    "賤人",
+    "賤胚",
+    "賤種",
+    "下賤",
+    "性無能",
+    "性功能障礙",
+    "性障礙",
+)
+TRAINING_NAME_FALLBACK = "群友"
 
 TOGGLE_ON_TEXT = "吵架模式開"
 TOGGLE_OFF_TEXT = "吵架模式關"
@@ -547,9 +573,19 @@ def is_insult(text):
     return _STRONG.search(norm) is not None
 
 
+def is_bare_insult(text):
+
+    norm = normalize_insult_text(text)
+
+    if not norm:
+        return False
+
+    return any(word in norm for word in BARE_INSULTS)
+
+
 def should_classify(text):
 
-    if is_insult(text):
+    if is_insult(text) or is_bare_insult(text):
         return False
 
     if not isinstance(text, str):
@@ -709,19 +745,73 @@ def _avoid_set(avoid):
     return set(_avoid_tuple(avoid))
 
 
-def pick_comeback(rng=None, avoid=()):
+def _cjk_bigrams(text):
+
+    chars = [
+        char for char in text
+        if "\u4e00" <= char <= "\u9fff"
+    ]
+
+    return {
+        chars[index] + chars[index + 1]
+        for index in range(len(chars) - 1)
+    }
+
+
+def _fixed_line_fits(insult, line):
+
+    # Lines 7–9 are generic. Honor them only when they share the
+    # insult's words; otherwise the model parks on line 7 forever.
+    if line not in COMEBACK_LINES[6:]:
+        return True
+
+    if not isinstance(insult, str) or not insult.strip():
+        return True
+
+    folded_insult = unicodedata.normalize("NFKC", insult).upper()
+    folded_line = unicodedata.normalize("NFKC", line).upper()
+
+    if "AI" in folded_insult and "AI" in folded_line:
+        return True
+
+    return bool(
+        _cjk_bigrams(folded_insult) & _cjk_bigrams(folded_line)
+    )
+
+
+def pick_comeback(rng=None, avoid=(), insult=""):
 
     choose = random.choice if rng is None else rng.choice
     blocked = _avoid_set(avoid)
     pool = tuple(
         line for line in COMEBACK_LINES
-        if line not in blocked
+        if line not in blocked and _fixed_line_fits(insult, line)
     )
+
+    if not pool:
+        pool = tuple(
+            line for line in COMEBACK_LINES
+            if line not in blocked
+        )
 
     if not pool:
         pool = COMEBACK_LINES
 
     return choose(pool)
+
+
+def _log_path(kind, line=""):
+
+    if kind == "fixed-choice" and line in COMEBACK_LINES:
+
+        COMEBACK_LOGGER.info(
+            "comeback path=fixed-choice line=%s",
+            COMEBACK_LINES.index(line) + 1,
+        )
+
+        return
+
+    COMEBACK_LOGGER.info("comeback path=%s", kind)
 
 
 def format_group_comeback(line):
@@ -981,10 +1071,7 @@ def classify_insult(openai_client, text, quoted=False):
 
     except Exception as exc:
 
-        print(
-            "Comeback classify error:",
-            type(exc).__name__
-        )
+        COMEBACK_LOGGER.warning("comeback classify error: %s", exc)
 
         return False
 
@@ -1146,13 +1233,16 @@ def _request_comeback(openai_client, text, quoted, previous, avoid=()):
         "instructions": _reply_instructions(),
         "input": _reply_input(text, quoted, previous, avoid),
         "max_output_tokens": 64,
-        "temperature": REPLY_TEMPERATURE,
         "timeout": CLASSIFY_TIMEOUT_SECONDS,
     }
 
+    # gpt-5 rejects temperature; sending it fails the call and the
+    # reply falls through to a fixed line.
     if "gpt-5" in model:
         kwargs["reasoning"] = {"effort": "minimal"}
         kwargs["max_output_tokens"] = 200
+    else:
+        kwargs["temperature"] = REPLY_TEMPERATURE
 
     response = openai_client.responses.create(**kwargs)
 
@@ -1216,7 +1306,7 @@ def _plain_reply_text(raw):
     return prepare_comeback_body(raw)
 
 
-def _read_reply(raw, avoid=()):
+def _read_reply(raw, avoid=(), insult=""):
 
     blocked = _avoid_set(avoid)
     payload = _parse_reply_payload(raw)
@@ -1233,7 +1323,7 @@ def _read_reply(raw, avoid=()):
 
             line = COMEBACK_LINES[number - 1]
 
-            if line not in blocked:
+            if line not in blocked and _fixed_line_fits(insult, line):
                 return line, ""
 
             if _comeback_body_ok(text) and text not in blocked:
@@ -1273,14 +1363,11 @@ def generate_comeback(openai_client, text, quoted=False, avoid=()):
 
     except Exception as exc:
 
-        print(
-            "Comeback reply error:",
-            type(exc).__name__
-        )
+        COMEBACK_LOGGER.warning("comeback reply error: %s", exc)
 
         return ""
 
-    chosen, hint = _read_reply(first_raw, blocked)
+    chosen, hint = _read_reply(first_raw, blocked, text)
 
     if chosen:
         return chosen
@@ -1297,14 +1384,11 @@ def generate_comeback(openai_client, text, quoted=False, avoid=()):
 
     except Exception as exc:
 
-        print(
-            "Comeback reply error:",
-            type(exc).__name__
-        )
+        COMEBACK_LOGGER.warning("comeback reply error: %s", exc)
 
         return _accept_finished(_plain_reply_text(first_raw), blocked)
 
-    chosen, _hint = _read_reply(second_raw, blocked)
+    chosen, _hint = _read_reply(second_raw, blocked, text)
 
     if chosen:
         return chosen
@@ -1327,20 +1411,47 @@ def _comeback_line(text, quoted, generate, group_id=""):
 
         except Exception as exc:
 
-            print(
-                "Comeback reply error:",
-                type(exc).__name__
-            )
+            COMEBACK_LOGGER.warning("comeback reply error: %s", exc)
 
             generated = ""
 
         if isinstance(generated, str):
             generated = generated.strip()
 
-        if generated in COMEBACK_LINES or _comeback_body_ok(generated):
+        recent = _avoid_set(recent_replies(group_id))
+        repeated = (
+            generated in COMEBACK_LINES and generated in recent
+        )
+        unfit = (
+            generated in COMEBACK_LINES
+            and not _fixed_line_fits(text, generated)
+        )
+
+        if (
+            not repeated
+            and not unfit
+            and (
+                generated in COMEBACK_LINES
+                or _comeback_body_ok(generated)
+            )
+        ):
+
+            kind = (
+                "fixed-choice"
+                if generated in COMEBACK_LINES
+                else "generated"
+            )
+            _log_path(kind, generated)
+
             return generated
 
-    return pick_comeback(avoid=recent_replies(group_id))
+    line = pick_comeback(
+        avoid=recent_replies(group_id),
+        insult=text,
+    )
+    _log_path("fallback", line)
+
+    return line
 
 
 def _toggle_allowed(user_id, owner_user_id):
@@ -1403,7 +1514,7 @@ def handle_group_text(
     if not comeback_enabled():
         return "disabled"
 
-    strong = is_insult(stripped)
+    strong = is_insult(stripped) or is_bare_insult(stripped)
     profane = is_profanity(stripped)
 
     if not profane and not strong and not should_classify(stripped):
@@ -1415,12 +1526,20 @@ def handle_group_text(
 
     except Exception as exc:
 
-        print(
-            "Comeback profile error:",
-            type(exc).__name__
-        )
+        COMEBACK_LOGGER.warning("comeback profile error: %s", exc)
 
-        return "lookup_error"
+        # The training room counts every sender. A failed group-member
+        # profile lookup must not drop them.
+        if not training:
+            return "lookup_error"
+
+        name = ""
+
+    if not isinstance(name, str):
+        name = ""
+
+    if training and not name.strip():
+        name = TRAINING_NAME_FALLBACK
 
     if not training and not is_target_sender(name):
         return "not_target"
@@ -1433,6 +1552,7 @@ def handle_group_text(
             reply(format_group_comeback(PROFANITY_REPLY))
 
         remember_reply(group_id, PROFANITY_REPLY)
+        _log_path("profanity")
 
         return "profanity"
 
@@ -1446,9 +1566,9 @@ def handle_group_text(
 
         except Exception as exc:
 
-            print(
-                "Comeback classify error:",
-                type(exc).__name__
+            COMEBACK_LOGGER.warning(
+                "comeback classify error: %s",
+                exc,
             )
 
             return "classify_error"

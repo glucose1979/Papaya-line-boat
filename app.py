@@ -1967,9 +1967,9 @@ def _lookup_group_name(group_id):
 
     except Exception as exc:
 
-        print(
-            "Group summary error:",
-            type(exc).__name__
+        comeback.COMEBACK_LOGGER.warning(
+            "comeback group summary error: %s",
+            exc,
         )
 
         return ""

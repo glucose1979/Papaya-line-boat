@@ -1033,7 +1033,6 @@ class HandleTests(unittest.TestCase):
         }
         for text in (
             "醜八怪",
-            "你性功能障礙",
             "白癡",
             "大白癡",
             "低能兒",
@@ -1044,6 +1043,8 @@ class HandleTests(unittest.TestCase):
             self.assertFalse(comeback.is_insult(text), text)
             self.assertFalse(comeback.is_profanity(text), text)
             self.assertTrue(comeback.should_classify(text), text)
+        self.assertTrue(comeback.is_bare_insult("你性功能障礙"))
+        self.assertFalse(comeback.should_classify("你性功能障礙"))
 
         self.classify_result = True
         result = self._handle(
@@ -1064,8 +1065,8 @@ class HandleTests(unittest.TestCase):
 
         self.classify_result = False
         self.classified.clear()
-        self.assertEqual(self._handle("你性功能障礙"), "not_insult")
-        self.assertEqual(self.classified, ["你性功能障礙"])
+        self.assertEqual(self._handle("醜八怪"), "not_insult")
+        self.assertEqual(self.classified, ["醜八怪"])
         self.assertEqual(len(self.replies), 1)
 
         self.classify_result = True
@@ -1073,7 +1074,7 @@ class HandleTests(unittest.TestCase):
             self._handle("大白癡", "Uother"),
             "not_target",
         )
-        self.assertEqual(self.classified, ["你性功能障礙"])
+        self.assertEqual(self.classified, ["醜八怪"])
 
     def test_recent_replies_stay_per_group_and_reset(self):
         for index in range(6):
@@ -1174,6 +1175,86 @@ class HandleTests(unittest.TestCase):
 
         self.assertEqual(result, "lookup_error")
         self.assertEqual(self.replies, [])
+
+    def test_slurs_and_sexual_jabs_trigger_without_the_classifier(self):
+        self.names = {"Uhung": "Hung Chang Chen"}
+        self.classify_result = False
+
+        for text in (
+            "性無能",
+            "你簡直性無能",
+            "賤貨",
+            "超級賤貨",
+            "哪個賤貨在群裡",
+        ):
+            self.assertTrue(comeback.is_bare_insult(text), text)
+            self.assertFalse(comeback.is_profanity(text), text)
+            self.assertFalse(comeback.should_classify(text), text)
+            self.replies.clear()
+            self.classified.clear()
+            result = self._handle(
+                text,
+                generate=lambda text, quoted=False: "就這句。",
+            )
+            self.assertEqual(result, "comeback", text)
+            self.assertEqual(self.classified, [])
+            self.assertEqual(
+                self.replies,
+                [comeback.COMEBACK_PREFIX + "就這句。"],
+            )
+
+    def test_training_profile_failure_still_replies(self):
+        self.classify_result = False
+
+        def broken(group_id, user_id):
+            raise RuntimeError("404 profile")
+
+        with self.assertLogs("papaya.comeback", level="INFO") as logs:
+            result = comeback.handle_group_text(
+                "哪個賤貨在群裡",
+                "Unew",
+                "Ctrain",
+                self.replies.append,
+                broken,
+                self._classify,
+                "Uowner",
+                training=True,
+                generate=lambda text, quoted=False: "就這句。",
+            )
+
+        self.assertEqual(result, "comeback")
+        self.assertEqual(self.classified, [])
+        self.assertEqual(self.replies, ["敬告 群友：就這句。"])
+        output = "\n".join(logs.output)
+        self.assertIn("profile error: 404 profile", output)
+        self.assertIn("path=generated", output)
+
+    def test_line_seven_is_not_reused_or_used_for_a_slur(self):
+        self.names = {"Uhung": "Hung Chang Chen"}
+        line = comeback.COMEBACK_LINES[6]
+
+        def always_line_seven(text, quoted=False):
+            return line
+
+        with self.assertLogs("papaya.comeback", level="INFO") as logs:
+            self._handle("垃圾AI", generate=always_line_seven)
+            first = self.replies[0]
+            self._handle("垃圾AI", generate=always_line_seven)
+            second = self.replies[1]
+            self._handle("賤貨", generate=always_line_seven)
+
+        self.assertEqual(first, comeback.COMEBACK_PREFIX + line)
+        self.assertNotEqual(second, first)
+        self.assertIn(
+            second[len(comeback.COMEBACK_PREFIX):],
+            comeback.COMEBACK_LINES,
+        )
+        slur_body = self.replies[-1][len(comeback.COMEBACK_PREFIX):]
+        self.assertNotEqual(slur_body, line)
+        self.assertIn(slur_body, comeback.COMEBACK_LINES[:6])
+        output = "\n".join(logs.output)
+        self.assertIn("path=fixed-choice line=7", output)
+        self.assertIn("path=fallback", output)
 
 
 class GenerateTests(unittest.TestCase):
@@ -1390,6 +1471,28 @@ class GenerateTests(unittest.TestCase):
             "就這水準？\n連 AI 都懶得跟你計較，你自己品味一下。",
             seen[0]["input"],
         )
+
+    def test_choice_seven_is_not_used_for_an_unrelated_slur(self):
+        line = comeback.COMEBACK_LINES[6]
+        client, seen = self._client([
+            '{"choice": 7, "text": "就這句。"}',
+        ])
+
+        body = comeback.generate_comeback(client, "超級賤貨")
+
+        self.assertEqual(body, "就這句。")
+        self.assertNotEqual(body, line)
+        self.assertEqual(len(seen), 1)
+
+        client, seen = self._client([
+            '{"choice": 7, "text": ""}',
+            '{"choice": 7, "text": ""}',
+        ])
+        self.assertEqual(
+            comeback.generate_comeback(client, "性無能"),
+            "",
+        )
+        self.assertEqual(len(seen), 2)
 
 
 class FakeHttpResponse:
