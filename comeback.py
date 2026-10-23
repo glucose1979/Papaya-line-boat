@@ -47,7 +47,7 @@ CLASSIFY_TIMEOUT_SECONDS = 8
 CLASSIFY_MAX_CHARS = 300
 REPLY_MODEL_DEFAULT = "gpt-4o-mini"
 REPLY_TEMPERATURE = 1.0
-COMEBACK_MAX_BODY_CHARS = 30
+COMEBACK_MAX_BODY_CHARS = 50
 RECENT_REPLY_LIMIT = 5
 CONTEXT_LIMIT = 5
 BOT_CONTEXT_NAME = "木瓜姊"
@@ -175,7 +175,7 @@ REPLY_INSTRUCTIONS = (
     "只輸出一個 JSON，不要加敬告、名字、前言或解釋：\n"
     '{"choice": 0, "text": ""}\n'
     "choice 是 1 到 9：那一句真的很貼，text 留空。\n"
-    "choice 是 0：自己寫。text 最多 30 個字，標點也算。\n"
+    "choice 是 0：自己寫。text 最多 50 個字，標點也算。\n"
     "可以刻薄、挖苦、諷刺。禁止髒話、詛咒、威脅、色情、歧視，"
     "也禁止辱罵家人、外貌、殘疾或族群。"
     "對方罵外貌或性功能時，不要把那些字原樣寫回去，"
@@ -193,7 +193,7 @@ LEWD_REPLY_INSTRUCTIONS = (
     "不要寫露骨的性行為、器官過程或教學。不要加敬告、名字、前言或解釋。\n"
     "只輸出一個 JSON，choice 固定 0：\n"
     '{"choice": 0, "text": ""}\n'
-    "text 最多 30 個字，標點也算。"
+    "text 最多 50 個字，標點也算。"
 )
 
 # A model refusal or a polite dodge. Soft markers apply only to the
@@ -1484,7 +1484,7 @@ def _reply_input(text, quoted, previous, avoid=(), context=()):
         prompt += (
             "\n\n上一句不合格或跟禁用句重複，不要再用："
             + previous[:40]
-            + "\n請改成 30 個字以內的一句。"
+            + "\n請改成 50 個字以內的一句。"
         )
 
     return prompt
@@ -1507,7 +1507,7 @@ def _request_comeback(
             LEWD_REPLY_INSTRUCTIONS if crude else _reply_instructions()
         ),
         "input": _reply_input(text, quoted, previous, avoid, context),
-        "max_output_tokens": 128,
+        "max_output_tokens": 256,
         "timeout": CLASSIFY_TIMEOUT_SECONDS,
     }
 
@@ -1515,7 +1515,7 @@ def _request_comeback(
     # reply falls through to a fixed line.
     if "gpt-5" in model:
         kwargs["reasoning"] = {"effort": "minimal"}
-        kwargs["max_output_tokens"] = 200
+        kwargs["max_output_tokens"] = 400
     else:
         kwargs["temperature"] = REPLY_TEMPERATURE
 
