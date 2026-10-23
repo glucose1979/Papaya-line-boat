@@ -1094,6 +1094,76 @@ class HandleTests(unittest.TestCase):
         self.assertEqual(comeback.recent_replies("Gone"), ())
         self.assertEqual(comeback.recent_replies("Gother"), ())
 
+    def test_context_is_kept_for_both_groups_and_includes_the_bot(self):
+        self.names = {
+            "Uhung": "Hung Chang Chen",
+            "Uother": "路人",
+            "Utrain": "朱靜羊",
+        }
+        self.classify_result = False
+        for index in range(6):
+            comeback.remember_context("Gone", "甲", str(index))
+        self.assertEqual(
+            comeback.recent_context("Gone"),
+            tuple(("甲", str(index)) for index in range(1, 6)),
+        )
+        self.assertIn("罵什麼", comeback.REPLY_INSTRUCTIONS)
+        self.assertIn("不要拿句裡單獨一個字", comeback.REPLY_INSTRUCTIONS)
+
+        self._handle(
+            "垃圾AI",
+            generate=lambda text, quoted=False: "就這句。",
+        )
+        self.assertEqual(
+            comeback.recent_context("Cgroup")[0],
+            ("Hung Chang Chen", "垃圾AI"),
+        )
+        self.assertEqual(
+            comeback.recent_context("Cgroup")[1][0],
+            "木瓜姊",
+        )
+        self.assertTrue(
+            comeback.recent_context("Cgroup")[1][1].startswith(
+                comeback.COMEBACK_PREFIX
+            )
+        )
+
+        self.assertEqual(
+            self._handle("今天天氣不錯", "Uother"),
+            "not_target",
+        )
+        self.assertEqual(
+            comeback.recent_context("Cgroup")[-1],
+            ("路人", "今天天氣不錯"),
+        )
+
+        comeback.handle_group_text(
+            "我都不看垃圾AI產出來的東西",
+            "Utrain",
+            "Ctrain",
+            self.replies.append,
+            self._lookup,
+            self._classify,
+            "Uowner",
+            training=True,
+            generate=lambda text, quoted=False: "沒看就判。",
+        )
+        trained = comeback.recent_context("Ctrain")
+        self.assertEqual(
+            trained[0],
+            ("朱靜羊", "我都不看垃圾AI產出來的東西"),
+        )
+        self.assertEqual(trained[1][0], "木瓜姊")
+        self.assertTrue(trained[1][1].startswith("敬告 朱靜羊："))
+        self.assertNotEqual(
+            comeback.recent_context("Cgroup"),
+            comeback.recent_context("Ctrain"),
+        )
+
+        comeback.reset_comeback_state()
+        self.assertEqual(comeback.recent_context("Cgroup"), ())
+        self.assertEqual(comeback.recent_context("Ctrain"), ())
+
     def test_profanity_still_repeats_when_it_was_just_used(self):
         self.names = {"Uhung": "Hung Chang Chen"}
         comeback.remember_reply("Cgroup", comeback.PROFANITY_REPLY)
@@ -1493,6 +1563,29 @@ class GenerateTests(unittest.TestCase):
             "",
         )
         self.assertEqual(len(seen), 2)
+
+    def test_context_is_passed_into_the_reply_prompt(self):
+        client, seen = self._client([
+            '{"choice": 0, "text": "沒看就先判。"}',
+        ])
+
+        body = comeback.generate_comeback(
+            client,
+            "我都不看垃圾AI產出來的東西",
+            context=(
+                ("路人", "這模型還可以"),
+                ("Hung Chang Chen", "我都不看垃圾AI產出來的東西"),
+            ),
+        )
+
+        self.assertEqual(body, "沒看就先判。")
+        self.assertIn(
+            "最近對話（舊到新）：\n路人：這模型還可以\n"
+            "Hung Chang Chen：我都不看垃圾AI產出來的東西",
+            seen[0]["input"],
+        )
+        self.assertIn("對方剛說：", seen[0]["input"])
+        self.assertIn("15", seen[0]["instructions"])
 
 
 class FakeHttpResponse:

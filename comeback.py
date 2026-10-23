@@ -44,6 +44,8 @@ REPLY_MODEL_DEFAULT = "gpt-4o-mini"
 REPLY_TEMPERATURE = 1.0
 COMEBACK_MAX_BODY_CHARS = 15
 RECENT_REPLY_LIMIT = 5
+CONTEXT_LIMIT = 5
+BOT_CONTEXT_NAME = "木瓜姊"
 
 COMEBACK_LOGGER = logging.getLogger("papaya.comeback")
 COMEBACK_LOGGER.setLevel(logging.INFO)
@@ -115,7 +117,8 @@ REPLY_INSTRUCTIONS = (
     "沒有點名也算在罵你。\n"
     "只有某一句真的很貼這句特定的嘲諷，才選它的編號。"
     "泛用、跟這幾個字對不上的，不要選。\n"
-    "對不上就自己寫一句，扣住對方剛用的那幾個字來挖苦，"
+    "對不上就自己寫一句。先看最近對話，弄懂這句在罵誰、罵什麼，"
+    "再針對那個意思回，不要拿句裡單獨一個字做雙關。"
     "每次換一種說法，不要跟最近用過的句子一樣。\n"
     "只輸出一個 JSON，不要加敬告、名字、前言或解釋：\n"
     '{"choice": 0, "text": ""}\n'
@@ -405,6 +408,7 @@ _TARGET_RE = re.compile(_target_pattern() + r"|人工智障")
 _enabled_override = None
 _state_lock = threading.Lock()
 _recent_replies = {}
+_recent_context = {}
 
 _names = {}
 _name_lock = threading.Lock()
@@ -688,6 +692,7 @@ def reset_comeback_state():
     with _state_lock:
         _enabled_override = None
         _recent_replies.clear()
+        _recent_context.clear()
 
     clear_display_name_cache()
     clear_group_name_cache()
@@ -720,6 +725,63 @@ def remember_reply(group_id, body):
         history = list(_recent_replies.get(group_id, ()))
         history.append(body)
         _recent_replies[group_id] = history[-RECENT_REPLY_LIMIT:]
+
+
+def recent_context(group_id):
+
+    if not isinstance(group_id, str) or group_id == "":
+        return ()
+
+    with _state_lock:
+        return tuple(_recent_context.get(group_id, ()))
+
+
+def remember_context(group_id, name, text):
+
+    if not isinstance(group_id, str) or group_id == "":
+        return
+
+    if not isinstance(text, str):
+        return
+
+    text = text.strip()[:CLASSIFY_MAX_CHARS]
+
+    if not text:
+        return
+
+    if not isinstance(name, str) or not name.strip():
+        name = "某人"
+    else:
+        name = name.strip()
+
+    with _state_lock:
+
+        history = list(_recent_context.get(group_id, ()))
+        history.append((name, text))
+        _recent_context[group_id] = history[-CONTEXT_LIMIT:]
+
+
+def _context_block(context):
+
+    lines = []
+
+    for item in context or ():
+
+        if not isinstance(item, (tuple, list)) or len(item) < 2:
+            continue
+
+        name, said = item[0], item[1]
+
+        if not isinstance(said, str) or not said.strip():
+            continue
+
+        who = name.strip() if isinstance(name, str) and name.strip() else "某人"
+        lines.append(who + "：" + said.strip())
+
+    if not lines:
+        return ""
+
+    return "最近對話（舊到新）：\n" + "\n".join(lines[-CONTEXT_LIMIT:]) + "\n\n"
 
 
 def _avoid_tuple(avoid):
@@ -1196,14 +1258,14 @@ def _finish_comeback_body(text):
     return ""
 
 
-def _reply_input(text, quoted, previous, avoid=()):
+def _reply_input(text, quoted, previous, avoid=(), context=()):
 
     body = (text or "").strip()[:CLASSIFY_MAX_CHARS]
 
     if quoted:
         body = "（這則是回覆訊息）\n" + body
 
-    prompt = "對方剛說：\n" + body
+    prompt = _context_block(context) + "對方剛說：\n" + body
     blocked = [
         item for item in avoid
         if isinstance(item, str) and item
@@ -1225,13 +1287,20 @@ def _reply_input(text, quoted, previous, avoid=()):
     return prompt
 
 
-def _request_comeback(openai_client, text, quoted, previous, avoid=()):
+def _request_comeback(
+    openai_client,
+    text,
+    quoted,
+    previous,
+    avoid=(),
+    context=(),
+):
 
     model = _reply_model()
     kwargs = {
         "model": model,
         "instructions": _reply_instructions(),
-        "input": _reply_input(text, quoted, previous, avoid),
+        "input": _reply_input(text, quoted, previous, avoid, context),
         "max_output_tokens": 64,
         "timeout": CLASSIFY_TIMEOUT_SECONDS,
     }
@@ -1347,9 +1416,16 @@ def _accept_finished(text, avoid):
     return ""
 
 
-def generate_comeback(openai_client, text, quoted=False, avoid=()):
+def generate_comeback(
+    openai_client,
+    text,
+    quoted=False,
+    avoid=(),
+    context=(),
+):
 
     blocked = _avoid_tuple(avoid)
+    history = tuple(context or ())
 
     try:
 
@@ -1359,6 +1435,7 @@ def generate_comeback(openai_client, text, quoted=False, avoid=()):
             quoted,
             None,
             blocked,
+            history,
         )
 
     except Exception as exc:
@@ -1380,6 +1457,7 @@ def generate_comeback(openai_client, text, quoted=False, avoid=()):
             quoted,
             hint,
             blocked,
+            history,
         )
 
     except Exception as exc:
@@ -1541,16 +1619,20 @@ def handle_group_text(
     if training and not name.strip():
         name = TRAINING_NAME_FALLBACK
 
+    remember_context(group_id, name, stripped)
+
     if not training and not is_target_sender(name):
         return "not_target"
 
     if profane:
 
         if training:
-            reply(format_training_comeback(PROFANITY_REPLY, name))
+            sent = format_training_comeback(PROFANITY_REPLY, name)
         else:
-            reply(format_group_comeback(PROFANITY_REPLY))
+            sent = format_group_comeback(PROFANITY_REPLY)
 
+        reply(sent)
+        remember_context(group_id, BOT_CONTEXT_NAME, sent)
         remember_reply(group_id, PROFANITY_REPLY)
         _log_path("profanity")
 
@@ -1579,10 +1661,12 @@ def handle_group_text(
     line = _comeback_line(stripped, quoted, generate, group_id)
 
     if training:
-        reply(format_training_comeback(line, name))
+        sent = format_training_comeback(line, name)
     else:
-        reply(format_group_comeback(line))
+        sent = format_group_comeback(line)
 
+    reply(sent)
+    remember_context(group_id, BOT_CONTEXT_NAME, sent)
     remember_reply(group_id, line)
 
     return "comeback"
