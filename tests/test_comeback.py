@@ -283,7 +283,7 @@ class MatcherTests(unittest.TestCase):
         ):
             self.assertIn(phrase, comeback.CLASSIFY_INSTRUCTIONS)
         self.assertIn("真的很貼", comeback.REPLY_INSTRUCTIONS)
-        self.assertIn("15", comeback.REPLY_INSTRUCTIONS)
+        self.assertIn("30", comeback.REPLY_INSTRUCTIONS)
         self.assertIn("敬告", comeback.REPLY_INSTRUCTIONS)
 
     def test_display_name_ignores_case_and_extra_spaces(self):
@@ -941,7 +941,7 @@ class HandleTests(unittest.TestCase):
             self.replies[0],
             comeback.COMEBACK_PREFIX + "就這水準？",
         )
-        self.assertLessEqual(len("就這水準？"), 15)
+        self.assertLessEqual(len("就這水準？"), 30)
         self.assertNotIn("就這水準？", comeback.COMEBACK_LINES)
 
         self.assertEqual(
@@ -1187,7 +1187,6 @@ class HandleTests(unittest.TestCase):
         self.names = {"Uhung": "Hung Chang Chen"}
         self.classify_result = False
         line = comeback.COMEBACK_LINES[6]
-        self.assertGreater(len(line), 15)
 
         result = self._handle(
             "垃圾AI",
@@ -1216,7 +1215,7 @@ class HandleTests(unittest.TestCase):
         )
 
         def too_long(text, quoted=False):
-            return "一二三四五六七八九十甲乙丙丁戊己"
+            return "長" * 31
 
         self.replies.clear()
         result = self._handle("垃圾AI", generate=too_long)
@@ -1367,13 +1366,13 @@ class GenerateTests(unittest.TestCase):
         self.assertEqual(seen[0]["model"], "gpt-4o-mini")
         self.assertNotIn("reasoning", seen[0])
         self.assertIn("垃圾AI", seen[0]["input"])
-        self.assertIn("15", seen[0]["instructions"])
+        self.assertIn("30", seen[0]["instructions"])
         self.assertIn("敬告", seen[0]["instructions"])
         self.assertEqual(len(seen), 1)
 
     def test_long_reply_retries_once_then_uses_the_short_one(self):
         client, seen = self._client([
-            "一二三四五六七八九十甲乙丙丁戊己",
+            "長" * 31,
             "你也配嫌。",
         ])
 
@@ -1386,18 +1385,18 @@ class GenerateTests(unittest.TestCase):
         self.assertEqual(body, "你也配嫌。")
         self.assertEqual(len(seen), 2)
         self.assertIn("（這則是回覆訊息）", seen[1]["input"])
-        self.assertIn("15 個字以內", seen[1]["input"])
+        self.assertIn("30 個字以內", seen[1]["input"])
 
     def test_still_long_reply_is_truncated_cleanly(self):
         client, seen = self._client([
-            "啊" * 16,
-            "一二三四五六七八九十一二三四，多餘",
+            "啊" * 31,
+            ("測" * 29) + "，多餘",
         ])
 
         body = comeback.generate_comeback(client, "回得什麼鬼")
 
-        self.assertEqual(body, "一二三四五六七八九十一二三四")
-        self.assertLessEqual(len(body), 15)
+        self.assertEqual(body, "測" * 29)
+        self.assertLessEqual(len(body), 30)
         self.assertEqual(len(seen), 2)
         self.assertFalse(body.endswith("，"))
 
@@ -1430,7 +1429,6 @@ class GenerateTests(unittest.TestCase):
 
     def test_json_choice_uses_that_fixed_line(self):
         line = comeback.COMEBACK_LINES[6]
-        self.assertGreater(len(line), comeback.COMEBACK_MAX_BODY_CHARS)
         client, seen = self._client([
             '{"choice": 7, "text": "不要用這句"}',
         ])
@@ -1466,7 +1464,7 @@ class GenerateTests(unittest.TestCase):
 
     def test_long_json_text_retries_then_accepts_a_line(self):
         client, seen = self._client([
-            '{"choice": 0, "text": "' + ("啊" * 16) + '"}',
+            '{"choice": 0, "text": "' + ("啊" * 31) + '"}',
             '{"choice": 2, "text": ""}',
         ])
 
@@ -1479,7 +1477,7 @@ class GenerateTests(unittest.TestCase):
         self.assertEqual(body, comeback.COMEBACK_LINES[1])
         self.assertEqual(len(seen), 2)
         self.assertIn("（這則是回覆訊息）", seen[1]["input"])
-        self.assertIn("15 個字以內", seen[1]["input"])
+        self.assertIn("30 個字以內", seen[1]["input"])
 
     def test_reply_call_uses_temperature_one(self):
         client, seen = self._client(['{"choice": 0, "text": "就這句。"}'])
@@ -1521,7 +1519,7 @@ class GenerateTests(unittest.TestCase):
         self.assertEqual(len(seen), 2)
         self.assertIn(line, seen[0]["input"])
         self.assertIn(line, seen[1]["input"])
-        self.assertIn("15 個字以內", seen[1]["input"])
+        self.assertIn("30 個字以內", seen[1]["input"])
 
     def test_repeated_free_text_retries_then_uses_a_new_line(self):
         client, seen = self._client([
@@ -1585,7 +1583,7 @@ class GenerateTests(unittest.TestCase):
             seen[0]["input"],
         )
         self.assertIn("對方剛說：", seen[0]["input"])
-        self.assertIn("15", seen[0]["instructions"])
+        self.assertIn("30", seen[0]["instructions"])
 
 
 class FakeHttpResponse:
@@ -2194,8 +2192,8 @@ class WebhookTests(unittest.TestCase):
 
     def test_webhook_truncates_then_falls_back_on_timeout(self):
         self._scripted.extend([
-            FakeChatResponse("啊" * 16),
-            FakeChatResponse("一二三四五六七八九十一二三四，多餘"),
+            FakeChatResponse("啊" * 31),
+            FakeChatResponse(("測" * 29) + "，多餘"),
         ])
 
         clipped = self._post_event(
@@ -2209,7 +2207,7 @@ class WebhookTests(unittest.TestCase):
         self.assertEqual(clipped.status_code, 200)
         self.assertEqual(
             self.posts[0]["json"]["messages"][0]["text"],
-            "敬告 Hung Chang Chen：一二三四五六七八九十一二三四",
+            "敬告 Hung Chang Chen：" + ("測" * 29),
         )
         self.assertEqual(len(self.calls), 2)
 
@@ -2224,7 +2222,7 @@ class WebhookTests(unittest.TestCase):
 
         self.assertEqual(len(self.calls), 3)
         self.assertIn(
-            "最近用過、不要再用：\n一二三四五六七八九十一二三四",
+            "最近用過、不要再用：\n" + ("測" * 29),
             self.calls[-1]["input"],
         )
         self.assertEqual(failed.status_code, 200)
