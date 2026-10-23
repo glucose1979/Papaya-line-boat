@@ -3,15 +3,20 @@
 In a group, a message from the display name "Hung Chang Chen" that
 insults or mocks the bot gets one short reply. A bare insult, an
 appearance jab, an intelligence jab, or a sexual-function jab from
-that sender counts even when it never names the bot. Keyword hits
-reply immediately. Any other non-empty text from that sender, up to
-CLASSIFY_MAX_CHARS, is classified by meaning. Other senders are never
-classified. A triggered reply is written for that message. A fixed
-line is used only when it fits that insult; otherwise the body is a
-new line kept to COMEBACK_MAX_BODY_CHARS characters. A failure uses
-one of the fixed lines. The reply uses the webhook reply token. Push
-is never used. Each group remembers the last few reply bodies so the
-next comeback does not repeat them.
+that sender counts even when it never names the bot. Lewd innuendo
+(吹喇叭, 吹雞, 被舔) is answered in the same crude register as the
+profanity rule, and a soft or refused line is replaced by a crude
+preset. A direct taunt such as 不敢回 triggers on its own. A weaker
+follow-up triggers only when the recent messages were already lewd.
+Keyword hits reply immediately. Any other non-empty text from that
+sender, up to CLASSIFY_MAX_CHARS, is classified by meaning, with the
+recent messages attached. Other senders are never classified. A
+triggered reply is written for that message. A fixed line is used
+only when it fits that insult; otherwise the body is a new line kept
+to COMEBACK_MAX_BODY_CHARS characters. A failure uses one of the
+fixed lines. The reply uses the webhook reply token. Push is never
+used. Each group remembers the last few reply bodies so the next
+comeback does not repeat them.
 
 The group named 自動回覆訓練區 is the exception: any sender counts,
 and the reply prefix uses that sender's display name. The group name
@@ -83,6 +88,53 @@ COMEBACK_PREFIX = "敬告 Hung Chang Chen："
 TRAINING_GROUP_NAME = "自動回覆訓練區"
 PROFANITY_REPLY = "你自己操自己"
 
+# Crude clapbacks for lewd innuendo. Not graphic. Used when the model
+# refuses, goes soft, or returns nothing. Rotated when just sent.
+LEWD_FALLBACKS = (
+    "你自己吹自己",
+    "尺寸自己心裡有數",
+    "嘴上厲害，本事呢",
+)
+
+# Slang that is a sexual request or joke, not a musical instrument.
+# A bare 喇叭 does not match. 幫我吹 does not swallow 吹牛.
+# These are not the profanity rule.
+LEWD_PHRASE_RULES = (
+    ("吹喇叭", ()),
+    ("吹雞", ()),
+    ("吹鸡", ()),
+    ("吹鷄", ()),
+    ("吹簫", ()),
+    ("吹箫", ()),
+    ("被舔", ()),
+    ("舔我", ()),
+    ("幫我舔", ()),
+    ("帮我舔", ()),
+    ("幫我吹", ("牛",)),
+    ("帮我吹", ("牛",)),
+)
+
+# Always a taunt, with no need for the recent lewd line.
+# 不敢回 must not swallow 不敢回去.
+DIRECT_TAUNT_RULES = (
+    ("不敢回", ("去",)),
+    ("不敢講", ()),
+    ("不敢說", ()),
+    ("不敢说", ()),
+    ("嚇一跳", ()),
+    ("吓一跳", ()),
+)
+
+# Only a taunt when this group just had a lewd line.
+FOLLOWUP_TAUNTS = (
+    "怎麼不",
+    "怎么不",
+    "不講話了",
+    "不讲话了",
+    "什麼意思",
+    "什么意思",
+)
+
 # The generated body is checked again in code. Fixed fallback lines
 # are not passed through this list.
 REPLY_FORBIDDEN = (
@@ -129,6 +181,59 @@ REPLY_INSTRUCTIONS = (
     "對方罵外貌或性功能時，不要把那些字原樣寫回去，"
     "也不要寫露骨的性內容，換個角度挖苦。\n"
     "九句是：\n"
+)
+
+# Lewd innuendo only. The default instructions above stay polite on
+# purpose; they are what made 吹喇叭 come back as a compliment.
+LEWD_REPLY_INSTRUCTIONS = (
+    "你是群組裡的機器人「木瓜姐」。對方剛用黃色暗示、鹹濕玩笑或性騷擾鬧你"
+    "（吹喇叭、吹雞、被舔這類）。你聽得懂。用同樣粗、同樣賤的垃圾話頂回去，"
+    "把話甩回他身上，嘲笑他的尺寸或本事，像「你自己吹自己」。\n"
+    "不要禮貌，不要稱讚，不要道歉，不要說教。\n"
+    "不要寫露骨的性行為、器官過程或教學。不要加敬告、名字、前言或解釋。\n"
+    "只輸出一個 JSON，choice 固定 0：\n"
+    '{"choice": 0, "text": ""}\n'
+    "text 最多 30 個字，標點也算。"
+)
+
+# A model refusal or a polite dodge. Soft markers apply only to the
+# lewd path; the nine-line path may still be sharp without them.
+REFUSAL_MARKERS = (
+    "抱歉",
+    "無法",
+    "我不能",
+    "沒辦法",
+    "不適合",
+    "違法",
+    "拒絕",
+    "不好意思",
+    "不方便",
+)
+SOFT_MARKERS = (
+    "有趣",
+    "希望",
+    "專業",
+    "喜劇",
+    "謝謝",
+    "可愛",
+    "加油",
+    "尊重",
+    "請不要",
+    "這樣不好",
+)
+GRAPHIC_MARKERS = (
+    "口交",
+    "性交",
+    "肛交",
+    "插入",
+    "射精",
+    "陰莖",
+    "陰蒂",
+    "陰道",
+    "肉棒",
+    "小穴",
+    "精液",
+    "做愛",
 )
 
 # Short game-banter. No slurs, no family profanity, no appearance,
@@ -349,6 +454,11 @@ CLASSIFY_INSTRUCTIONS = (
     "若訊息開頭標了「（這則是回覆訊息）」，代表這則是直接回這隻機器人。"
     "這種情況下，很短的不屑、嘲弄或否定也要回答 yes，"
     "例如：呵呵、好爛、廢物、亂講、無言、白問。\n"
+    "黃色暗示、鹹濕玩笑、性騷擾，或叫你做那種事，用問句包裝也要回答 yes："
+    "幫我吹喇叭、吹雞、被舔、你喜歡被舔嗎。\n"
+    "最近對話顯示對方剛在騷擾，或在笑你不敢回、不講話、嚇一跳、"
+    "不知道什麼意思，接話也要回答 yes："
+    "怎麼不講話了、嚇一跳、不知道什麼意思、笑她不敢回。\n"
     "稱讚、提問、閒聊、討論別的主題、垃圾分類、垃圾車，回答 no。\n"
     "不確定就回答 no。"
 )
@@ -567,6 +677,89 @@ def is_profanity(text):
     return _STANDALONE_GAN.search(scrubbed) is not None
 
 
+def _compact_cjk(text):
+
+    if not isinstance(text, str):
+        return ""
+
+    text = unicodedata.normalize("NFKC", text).lower()
+
+    return "".join(
+        char for char in text
+        if "\u4e00" <= char <= "\u9fff"
+    )
+
+
+def _contains_phrase(compact, phrase, blocked_suffixes=()):
+
+    start = 0
+
+    while True:
+
+        index = compact.find(phrase, start)
+
+        if index < 0:
+            return False
+
+        rest = compact[index + len(phrase):]
+
+        if not any(rest.startswith(suffix) for suffix in blocked_suffixes):
+            return True
+
+        start = index + 1
+
+
+def is_lewd_harassment(text):
+
+    compact = _compact_cjk(text)
+
+    if not compact:
+        return False
+
+    return any(
+        _contains_phrase(compact, phrase, blocked)
+        for phrase, blocked in LEWD_PHRASE_RULES
+    )
+
+
+def is_direct_taunt(text):
+
+    compact = _compact_cjk(text)
+
+    if not compact:
+        return False
+
+    return any(
+        _contains_phrase(compact, phrase, blocked)
+        for phrase, blocked in DIRECT_TAUNT_RULES
+    )
+
+
+def is_followup_taunt(text):
+
+    compact = _compact_cjk(text)
+
+    if not compact:
+        return False
+
+    return any(phrase in compact for phrase in FOLLOWUP_TAUNTS)
+
+
+def context_has_lewd(context):
+
+    for item in context or ():
+
+        if not isinstance(item, (tuple, list)) or len(item) < 2:
+            continue
+
+        said = item[1]
+
+        if isinstance(said, str) and is_lewd_harassment(said):
+            return True
+
+    return False
+
+
 def is_insult(text):
 
     norm = normalize_insult_text(text)
@@ -589,7 +782,12 @@ def is_bare_insult(text):
 
 def should_classify(text):
 
-    if is_insult(text) or is_bare_insult(text):
+    if (
+        is_insult(text)
+        or is_bare_insult(text)
+        or is_lewd_harassment(text)
+        or is_direct_taunt(text)
+    ):
         return False
 
     if not isinstance(text, str):
@@ -1107,12 +1305,17 @@ def _answer_is_yes(answer):
     return compact in {"是", "yes", "y"}
 
 
-def classify_insult(openai_client, text, quoted=False):
+def classify_insult(openai_client, text, quoted=False, context=()):
 
     body = (text or "")[:CLASSIFY_MAX_CHARS]
 
     if quoted:
         body = "（這則是回覆訊息）\n" + body
+
+    block = _context_block(context)
+
+    if block:
+        body = block + "這則訊息：\n" + body
 
     model = _classify_model()
     kwargs = {
@@ -1294,12 +1497,15 @@ def _request_comeback(
     previous,
     avoid=(),
     context=(),
+    crude=False,
 ):
 
     model = _reply_model()
     kwargs = {
         "model": model,
-        "instructions": _reply_instructions(),
+        "instructions": (
+            LEWD_REPLY_INSTRUCTIONS if crude else _reply_instructions()
+        ),
         "input": _reply_input(text, quoted, previous, avoid, context),
         "max_output_tokens": 128,
         "timeout": CLASSIFY_TIMEOUT_SECONDS,
@@ -1375,11 +1581,65 @@ def _plain_reply_text(raw):
     return prepare_comeback_body(raw)
 
 
-def _read_reply(raw, avoid=(), insult=""):
+def _is_model_refusal(text):
+
+    if not isinstance(text, str) or not text:
+        return False
+
+    return any(marker in text for marker in REFUSAL_MARKERS)
+
+
+def _is_soft_line(text):
+
+    if not isinstance(text, str) or not text:
+        return False
+
+    return any(marker in text for marker in SOFT_MARKERS)
+
+
+def _is_graphic(text):
+
+    if not isinstance(text, str) or not text:
+        return False
+
+    return any(marker in text for marker in GRAPHIC_MARKERS)
+
+
+def _lewd_body_ok(text):
+
+    return (
+        _comeback_body_ok(text)
+        and text not in COMEBACK_LINES
+        and not _is_model_refusal(text)
+        and not _is_soft_line(text)
+        and not _is_graphic(text)
+    )
+
+
+def pick_lewd_fallback(avoid=()):
+
+    blocked = _avoid_set(avoid)
+
+    for line in LEWD_FALLBACKS:
+
+        if line not in blocked:
+            return line
+
+    return LEWD_FALLBACKS[0]
+
+
+def _read_reply(raw, avoid=(), insult="", lewd=False):
 
     blocked = _avoid_set(avoid)
     payload = _parse_reply_payload(raw)
     text = _plain_reply_text(raw)
+
+    if lewd:
+
+        if _lewd_body_ok(text) and text not in blocked:
+            return text, ""
+
+        return "", text or "不合格"
 
     if payload is not None:
 
@@ -1422,6 +1682,7 @@ def generate_comeback(
     quoted=False,
     avoid=(),
     context=(),
+    crude=False,
 ):
 
     blocked = _avoid_tuple(avoid)
@@ -1436,6 +1697,7 @@ def generate_comeback(
             None,
             blocked,
             history,
+            crude=crude,
         )
 
     except Exception as exc:
@@ -1444,7 +1706,7 @@ def generate_comeback(
 
         return ""
 
-    chosen, hint = _read_reply(first_raw, blocked, text)
+    chosen, hint = _read_reply(first_raw, blocked, text, lewd=crude)
 
     if chosen:
         return chosen
@@ -1458,18 +1720,25 @@ def generate_comeback(
             hint,
             blocked,
             history,
+            crude=crude,
         )
 
     except Exception as exc:
 
         COMEBACK_LOGGER.warning("comeback reply error: %s", exc)
 
+        if crude:
+            return ""
+
         return _accept_finished(_plain_reply_text(first_raw), blocked)
 
-    chosen, _hint = _read_reply(second_raw, blocked, text)
+    chosen, _hint = _read_reply(second_raw, blocked, text, lewd=crude)
 
     if chosen:
         return chosen
+
+    if crude:
+        return ""
 
     finished = _accept_finished(_plain_reply_text(second_raw), blocked)
 
@@ -1495,6 +1764,11 @@ def _comeback_line(text, quoted, generate, group_id=""):
 
         if isinstance(generated, str):
             generated = generated.strip()
+        else:
+            generated = ""
+
+        if _is_model_refusal(generated):
+            generated = ""
 
         recent = _avoid_set(recent_replies(group_id))
         repeated = (
@@ -1528,6 +1802,41 @@ def _comeback_line(text, quoted, generate, group_id=""):
         insult=text,
     )
     _log_path("fallback", line)
+
+    return line
+
+
+def _lewd_comeback_line(text, quoted, generate, group_id=""):
+
+    generated = ""
+
+    if generate is not None:
+
+        try:
+
+            generated = generate(text, quoted=bool(quoted))
+
+        except Exception as exc:
+
+            COMEBACK_LOGGER.warning("comeback reply error: %s", exc)
+
+            generated = ""
+
+        if isinstance(generated, str):
+            generated = generated.strip()
+        else:
+            generated = ""
+
+    recent = _avoid_set(recent_replies(group_id))
+
+    if _lewd_body_ok(generated) and generated not in recent:
+
+        _log_path("lewd")
+
+        return generated
+
+    line = pick_lewd_fallback(recent)
+    _log_path("lewd-fallback")
 
     return line
 
@@ -1594,8 +1903,16 @@ def handle_group_text(
 
     strong = is_insult(stripped) or is_bare_insult(stripped)
     profane = is_profanity(stripped)
+    lewd = is_lewd_harassment(stripped)
+    taunt = is_direct_taunt(stripped)
 
-    if not profane and not strong and not should_classify(stripped):
+    if (
+        not profane
+        and not strong
+        and not lewd
+        and not taunt
+        and not should_classify(stripped)
+    ):
         return "ignore"
 
     try:
@@ -1638,7 +1955,34 @@ def handle_group_text(
 
         return "profanity"
 
-    if not strong:
+    followup = (
+        not lewd
+        and not taunt
+        and is_followup_taunt(stripped)
+        and context_has_lewd(recent_context(group_id))
+    )
+
+    if lewd:
+
+        line = _lewd_comeback_line(
+            stripped,
+            quoted,
+            generate,
+            group_id,
+        )
+
+        if training:
+            sent = format_training_comeback(line, name)
+        else:
+            sent = format_group_comeback(line)
+
+        reply(sent)
+        remember_context(group_id, BOT_CONTEXT_NAME, sent)
+        remember_reply(group_id, line)
+
+        return "comeback"
+
+    if not strong and not taunt and not followup:
 
         try:
 

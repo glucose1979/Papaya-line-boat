@@ -210,6 +210,50 @@ class MatcherTests(unittest.TestCase):
         ):
             self.assertFalse(comeback.is_profanity(text), repr(text))
 
+    def test_lewd_innuendo_and_taunts_are_separate_from_profanity(self):
+        for text in (
+            "幫我吹喇叭可以嗎",
+            "聽到幫我吹喇叭你就嚇一跳？",
+            "你喜歡被舔嗎還是幫我吹雞吧",
+            "吹 喇 叭",
+            "幫我吹簫",
+            "舔我",
+            "幫我舔",
+        ):
+            self.assertTrue(comeback.is_lewd_harassment(text), text)
+            self.assertFalse(comeback.is_profanity(text), text)
+            self.assertFalse(comeback.should_classify(text), text)
+
+        for text in (
+            "喇叭壞了",
+            "幫我吹牛",
+            "大家好",
+            "怎麼不講話了喔",
+            "還是你不知道這是什麼意思？",
+            None,
+            "",
+        ):
+            self.assertFalse(comeback.is_lewd_harassment(text), repr(text))
+
+        self.assertTrue(comeback.is_direct_taunt("笑她不敢回"))
+        self.assertTrue(comeback.is_direct_taunt("你就嚇一跳"))
+        self.assertFalse(comeback.is_direct_taunt("我不敢回去"))
+        self.assertFalse(comeback.should_classify("笑她不敢回"))
+        self.assertTrue(comeback.is_followup_taunt("怎麼不講話了喔"))
+        self.assertTrue(
+            comeback.is_followup_taunt("還是你不知道這是什麼意思？")
+        )
+        self.assertFalse(comeback.is_followup_taunt("笑她不敢回"))
+        for phrase in (
+            "幫我吹喇叭",
+            "吹雞",
+            "被舔",
+            "你喜歡被舔嗎",
+            "怎麼不講話了",
+            "笑她不敢回",
+        ):
+            self.assertIn(phrase, comeback.CLASSIFY_INSTRUCTIONS)
+
     def test_non_text_is_not_an_insult(self):
         self.assertFalse(comeback.is_insult(None))
         self.assertFalse(comeback.is_insult(""))
@@ -1325,6 +1369,237 @@ class HandleTests(unittest.TestCase):
         self.assertIn("path=fixed-choice line=7", output)
         self.assertIn("path=fallback", output)
 
+    def test_lewd_soft_or_empty_reply_uses_a_crude_preset(self):
+        self.names = {
+            "Ualex": "Alex Hou",
+            "Uhung": "Hung Chang Chen",
+            "Uother": "Someone Else",
+        }
+        self.classify_result = False
+        soft = "你的提問真有趣，真希望你也能成為一名專業的喜劇演員。"
+
+        def soft_line(text, quoted=False):
+            return soft
+
+        for text in (
+            "幫我吹喇叭可以嗎",
+            "聽到幫我吹喇叭你就嚇一跳？",
+            "你喜歡被舔嗎還是幫我吹雞吧",
+        ):
+            comeback.reset_comeback_state()
+            self.replies.clear()
+            self.classified.clear()
+            result = self._handle(
+                text,
+                "Ualex",
+                training=True,
+                generate=soft_line,
+            )
+            self.assertEqual(result, "comeback", text)
+            self.assertEqual(self.classified, [])
+            self.assertEqual(
+                self.replies,
+                ["敬告 Alex Hou：" + comeback.LEWD_FALLBACKS[0]],
+            )
+            self.assertLessEqual(len(comeback.LEWD_FALLBACKS[0]), 30)
+            self.assertNotIn(
+                self.replies[0].split("：", 1)[1],
+                comeback.COMEBACK_LINES,
+            )
+
+        comeback.reset_comeback_state()
+        self.replies.clear()
+        self.assertEqual(
+            self._handle("幫我吹喇叭可以嗎", generate=soft_line),
+            "comeback",
+        )
+        self.assertEqual(
+            self.replies,
+            [comeback.COMEBACK_PREFIX + "你自己吹自己"],
+        )
+        self.assertEqual(
+            self._handle("幫我吹喇叭可以嗎", "Uother", generate=soft_line),
+            "not_target",
+        )
+        self.assertEqual(len(self.replies), 1)
+
+        seen = []
+
+        def watched(text, quoted=False):
+            seen.append(text)
+            return soft
+
+        self.assertEqual(
+            self._handle("幹你娘還要吹喇叭", generate=watched),
+            "profanity",
+        )
+        self.assertEqual(seen, [])
+        self.assertTrue(self.replies[-1].endswith("你自己操自己"))
+
+        comeback.reset_comeback_state()
+        self.replies.clear()
+        self.classified.clear()
+
+        def empty(text, quoted=False):
+            return ""
+
+        def refused(text, quoted=False):
+            return "抱歉，我無法回應這種要求"
+
+        def graphic(text, quoted=False):
+            return "那種口交過程"
+
+        def crude(text, quoted=False):
+            return "你自己吹自己"
+
+        for generate in (empty, refused, graphic):
+            comeback.reset_comeback_state()
+            self.replies.clear()
+            result = self._handle(
+                "幫我吹喇叭可以嗎",
+                "Ualex",
+                training=True,
+                generate=generate,
+            )
+            self.assertEqual(result, "comeback")
+            self.assertEqual(
+                self.replies,
+                ["敬告 Alex Hou：你自己吹自己"],
+            )
+
+        comeback.reset_comeback_state()
+        self.replies.clear()
+        self.assertEqual(
+            self._handle(
+                "幫我吹喇叭可以嗎",
+                "Ualex",
+                training=True,
+                generate=crude,
+            ),
+            "comeback",
+        )
+        self.assertEqual(self.replies, ["敬告 Alex Hou：你自己吹自己"])
+
+        comeback.reset_comeback_state()
+        self.replies.clear()
+        bodies = []
+        for _ in range(3):
+            self._handle(
+                "幫我吹喇叭可以嗎",
+                "Ualex",
+                training=True,
+                generate=soft_line,
+            )
+            bodies.append(self.replies[-1].split("：", 1)[1])
+        self.assertEqual(bodies, list(comeback.LEWD_FALLBACKS))
+
+    def test_followup_taunts_need_a_recent_lewd_line(self):
+        self.names = {
+            "Ualex": "Alex Hou",
+            "Uhung": "Hung Chang Chen",
+        }
+        self.classify_result = False
+
+        self.assertEqual(
+            self._handle("怎麼不講話了喔", "Ualex", training=True),
+            "not_insult",
+        )
+        self.assertEqual(
+            self._handle(
+                "還是你不知道這是什麼意思？",
+                "Ualex",
+                training=True,
+            ),
+            "not_insult",
+        )
+        self.assertEqual(self.replies, [])
+        self.assertEqual(
+            self.classified,
+            ["怎麼不講話了喔", "還是你不知道這是什麼意思？"],
+        )
+
+        comeback.reset_comeback_state()
+        self.replies.clear()
+        self.classified.clear()
+        self._handle(
+            "幫我吹喇叭可以嗎",
+            "Ualex",
+            training=True,
+            generate=lambda text, quoted=False: "",
+        )
+        self.classified.clear()
+
+        def sharp(text, quoted=False):
+            return "就這水準？"
+
+        for text in (
+            "怎麼不講話了喔",
+            "還是你不知道這是什麼意思？",
+        ):
+            result = self._handle(
+                text,
+                "Ualex",
+                training=True,
+                generate=sharp,
+            )
+            self.assertEqual(result, "comeback", text)
+            self.assertTrue(self.replies[-1].endswith("就這水準？"), text)
+
+        self.assertEqual(self.classified, [])
+
+        comeback.reset_comeback_state()
+        self.replies.clear()
+        self.classified.clear()
+        self.assertEqual(
+            self._handle(
+                "笑她不敢回",
+                generate=sharp,
+            ),
+            "comeback",
+        )
+        self.assertEqual(self.classified, [])
+        self.assertEqual(
+            self.replies,
+            [comeback.COMEBACK_PREFIX + "就這水準？"],
+        )
+        self.assertEqual(
+            self._handle("我不敢回去"),
+            "not_insult",
+        )
+
+        comeback.reset_comeback_state()
+        self.replies.clear()
+        result = self._handle(
+            "垃圾AI",
+            generate=lambda text, quoted=False: "抱歉，我無法回應",
+        )
+        self.assertEqual(result, "comeback")
+        body = self.replies[-1][len(comeback.COMEBACK_PREFIX):]
+        self.assertIn(body, comeback.COMEBACK_LINES)
+        self.assertNotEqual(body, "你自己吹自己")
+
+    def test_training_profile_failure_still_replies_to_lewd(self):
+        self.classify_result = False
+
+        def broken(group_id, user_id):
+            raise RuntimeError("404 profile")
+
+        result = comeback.handle_group_text(
+            "幫我吹喇叭可以嗎",
+            "Unew",
+            "Ctrain",
+            self.replies.append,
+            broken,
+            self._classify,
+            "Uowner",
+            training=True,
+            generate=lambda text, quoted=False: "",
+        )
+
+        self.assertEqual(result, "comeback")
+        self.assertEqual(self.classified, [])
+        self.assertEqual(self.replies, ["敬告 群友：你自己吹自己"])
+
 
 class GenerateTests(unittest.TestCase):
 
@@ -1584,6 +1859,78 @@ class GenerateTests(unittest.TestCase):
         )
         self.assertIn("對方剛說：", seen[0]["input"])
         self.assertIn("30", seen[0]["instructions"])
+
+    def test_crude_mode_drops_a_soft_line_and_keeps_a_clapback(self):
+        soft = (
+            '{"choice": 0, "text": "'
+            "你的提問真有趣，真希望你也能成為一名專業的喜劇演員。"
+            '"}'
+        )
+        client, seen = self._client([
+            soft,
+            '{"choice": 0, "text": "抱歉，我無法"}',
+        ])
+
+        self.assertEqual(
+            comeback.generate_comeback(
+                client,
+                "幫我吹喇叭可以嗎",
+                crude=True,
+            ),
+            "",
+        )
+        self.assertEqual(len(seen), 2)
+        self.assertIn("你自己吹自己", seen[0]["instructions"])
+        self.assertIn("30", seen[0]["instructions"])
+        self.assertNotIn("禁止髒話", seen[0]["instructions"])
+        self.assertNotIn("垃圾回覆，專送垃圾人", seen[0]["instructions"])
+        self.assertEqual(seen[0]["temperature"], 1.0)
+
+        client, seen = self._client([
+            '{"choice": 7, "text": "尺寸自己心裡有數"}',
+        ])
+        self.assertEqual(
+            comeback.generate_comeback(client, "吹雞", crude=True),
+            "尺寸自己心裡有數",
+        )
+        self.assertEqual(len(seen), 1)
+
+        client, seen = self._client([
+            '{"choice": 0, "text": "就這句。"}',
+        ])
+        comeback.generate_comeback(client, "垃圾AI")
+        self.assertIn("禁止髒話", seen[0]["instructions"])
+        self.assertIn("真的很貼", seen[0]["instructions"])
+
+    def test_classify_input_includes_context_only_when_given(self):
+        seen = {}
+
+        class Response:
+
+            def __init__(self, text):
+                self.output_text = text
+
+        class Client:
+
+            def __init__(self):
+                self.responses = self
+
+            def create(self, **kwargs):
+                seen["kwargs"] = kwargs
+                return Response("yes")
+
+        comeback.classify_insult(
+            Client(),
+            "怎麼不講話了喔",
+            context=(("Alex Hou", "幫我吹喇叭可以嗎"),),
+        )
+        self.assertIn("最近對話（舊到新）：", seen["kwargs"]["input"])
+        self.assertIn("Alex Hou：幫我吹喇叭可以嗎", seen["kwargs"]["input"])
+        self.assertIn("這則訊息：\n怎麼不講話了喔", seen["kwargs"]["input"])
+
+        comeback.classify_insult(Client(), "問了也是白問")
+        self.assertEqual(seen["kwargs"]["input"], "問了也是白問")
+        self.assertNotIn("最近對話", seen["kwargs"]["input"])
 
 
 class FakeHttpResponse:
@@ -2037,9 +2384,8 @@ class WebhookTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(self.calls), 2)
         self.assertIn("問了也是白問", self.calls[0]["instructions"])
-        self.assertTrue(
-            self.calls[0]["input"].startswith("（這則是回覆訊息）\n")
-        )
+        self.assertIn("最近對話（舊到新）：", self.calls[0]["input"])
+        self.assertIn("（這則是回覆訊息）\n", self.calls[0]["input"])
         self.assertIn("問了也是白問", self.calls[0]["input"])
         self.assertEqual(len(self.posts), 1)
         sent = self.posts[0]["json"]["messages"][0]["text"]
@@ -2299,6 +2645,40 @@ class WebhookTests(unittest.TestCase):
             self.posts[0]["json"]["messages"][0]["text"],
             comeback.COMEBACK_PREFIX + line,
         )
+
+    def test_webhook_lewd_soft_line_falls_back_to_the_crude_preset(self):
+        self.group_names["Ctrain"] = "自動回覆訓練區"
+        self.names["Ualex"] = "Alex Hou"
+        soft = (
+            '{"choice": 0, "text": "'
+            "你的提問真有趣，真希望你也能成為一名專業的喜劇演員。"
+            '"}'
+        )
+        self._scripted.append(FakeChatResponse(soft))
+        self._scripted.append(FakeChatResponse(
+            '{"choice": 0, "text": "抱歉，我無法回應這種要求"}'
+        ))
+
+        response = self._post_event(
+            self._text_event(
+                "幫我吹喇叭可以嗎",
+                user_id="Ualex",
+                source_type="group",
+                group_id="Ctrain",
+            )
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(self.calls), 2)
+        self.assertIn("你自己吹自己", self.calls[0]["instructions"])
+        self.assertNotIn("禁止髒話", self.calls[0]["instructions"])
+        self.assertEqual(self.calls[0]["temperature"], 1.0)
+        self.assertEqual(len(self.posts), 1)
+        self.assertEqual(
+            self.posts[0]["json"]["messages"][0]["text"],
+            "敬告 Alex Hou：你自己吹自己",
+        )
+        self.assertNotIn("push", self.posts[0]["url"])
 
 
 if __name__ == "__main__":
