@@ -10,7 +10,9 @@ preset. A direct taunt such as 不敢回 triggers on its own. A weaker
 follow-up triggers only when the recent messages were already lewd.
 Keyword hits reply immediately. Any other non-empty text from that
 sender, up to CLASSIFY_MAX_CHARS, is classified by meaning, with the
-recent messages attached. Other senders are never classified. A
+recent messages attached. Before that, a second identical paste from
+the same sender in the same group gets one fixed copy-paste line,
+then that text's count resets. Other senders are never classified. A
 triggered reply is written for that message. A fixed line is used
 only when it fits that insult; otherwise the body is a new line kept
 to COMEBACK_MAX_BODY_CHARS characters. A failure uses one of the
@@ -25,7 +27,8 @@ comes from LINE Get group summary and is cached per group id.
 The on/off switch starts from COMEBACK_MODE (default on). The owner
 can flip that same global switch from the 1:1 private chat or from a
 group. A process restart drops the override, the display-name
-cache, the group-name cache, and the per-group reply history, then
+cache, the group-name cache, the per-group reply history, and the
+per-sender paste history, then
 starts from the env default again. Render's one-worker gunicorn
 process is the intended setup.
 """
@@ -50,6 +53,7 @@ REPLY_TEMPERATURE = 1.0
 COMEBACK_MAX_BODY_CHARS = 50
 RECENT_REPLY_LIMIT = 5
 CONTEXT_LIMIT = 5
+COPY_PASTE_HISTORY = 20
 BOT_CONTEXT_NAME = "木瓜姊"
 
 COMEBACK_LOGGER = logging.getLogger("papaya.comeback")
@@ -87,6 +91,7 @@ STATUS_OFF_REPLY = "吵架模式現在是關的。"
 COMEBACK_PREFIX = "敬告 Hung Chang Chen："
 TRAINING_GROUP_NAME = "自動回覆訓練區"
 PROFANITY_REPLY = "你自己操自己"
+COPY_PASTE_REPLY = "笑死，燒豬又在複製貼上。大當機！大失敗！"
 
 # Crude clapbacks for lewd innuendo. Not graphic. Used when the model
 # refuses, goes soft, or returns nothing. Rotated when just sent.
@@ -519,6 +524,7 @@ _enabled_override = None
 _state_lock = threading.Lock()
 _recent_replies = {}
 _recent_context = {}
+_recent_pastes = {}
 
 _names = {}
 _name_lock = threading.Lock()
@@ -891,9 +897,58 @@ def reset_comeback_state():
         _enabled_override = None
         _recent_replies.clear()
         _recent_context.clear()
+        _recent_pastes.clear()
 
     clear_display_name_cache()
     clear_group_name_cache()
+
+
+def normalize_paste_text(text):
+
+    if not isinstance(text, str):
+        return ""
+
+    return text.strip()
+
+
+def observe_copy_paste(group_id, user_id, text):
+
+    """Track one eligible message. True on the second identical paste.
+
+    Whitespace at the ends is ignored. A hit drops that text, so the
+    next copy starts a new pair and fires again on the pair after that.
+    Only the last COPY_PASTE_HISTORY texts for that sender are kept.
+    """
+
+    if not isinstance(group_id, str) or group_id == "":
+        return False
+
+    if not isinstance(user_id, str) or user_id == "":
+        return False
+
+    norm = normalize_paste_text(text)
+
+    if not norm:
+        return False
+
+    with _state_lock:
+
+        by_user = _recent_pastes.setdefault(group_id, {})
+        history = list(by_user.get(user_id, ()))
+
+        if norm in history:
+
+            by_user[user_id] = [
+                item for item in history
+                if item != norm
+            ]
+
+            return True
+
+        history.append(norm)
+        by_user[user_id] = history[-COPY_PASTE_HISTORY:]
+
+        return False
 
 
 def recent_replies(group_id):
@@ -1954,6 +2009,20 @@ def handle_group_text(
         _log_path("profanity")
 
         return "profanity"
+
+    if observe_copy_paste(group_id, user_id, stripped):
+
+        if training:
+            sent = format_training_comeback(COPY_PASTE_REPLY, name)
+        else:
+            sent = format_group_comeback(COPY_PASTE_REPLY)
+
+        reply(sent)
+        remember_context(group_id, BOT_CONTEXT_NAME, sent)
+        remember_reply(group_id, COPY_PASTE_REPLY)
+        _log_path("copy-paste")
+
+        return "copy_paste"
 
     followup = (
         not lewd
