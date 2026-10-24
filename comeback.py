@@ -10,10 +10,10 @@ preset. A direct taunt such as 不敢回 triggers on its own. A weaker
 follow-up triggers only when the recent messages were already lewd.
 Keyword hits reply immediately. Any other non-empty text from that
 sender, up to CLASSIFY_MAX_CHARS, is classified by meaning, with the
-recent messages attached. Before that, a second identical paste from
-the same sender in the same group gets one fixed copy-paste line,
-then that text's count resets. Other senders are never classified. A
-triggered reply is written for that message. A fixed line is used
+recent messages attached. Before that, the second and every later
+identical paste from the same sender gets one fixed copy-paste line.
+A redelivered webhook is not another paste. Other senders are never
+classified. A triggered reply is written for that message. A fixed line is used
 only when it fits that insult; otherwise the body is a new line kept
 to COMEBACK_MAX_BODY_CHARS characters. A failure uses one of the
 fixed lines. The reply uses the webhook reply token. Push is never
@@ -27,8 +27,8 @@ comes from LINE Get group summary and is cached per group id.
 The on/off switch starts from COMEBACK_MODE (default on). The owner
 can flip that same global switch from the 1:1 private chat or from a
 group. A process restart drops the override, the display-name
-cache, the group-name cache, the per-group reply history, and the
-per-sender paste history, then
+cache, the group-name cache, the per-group reply history, the
+per-sender paste history, and the recent webhook event ids, then
 starts from the env default again. Render's one-worker gunicorn
 process is the intended setup.
 """
@@ -54,6 +54,7 @@ COMEBACK_MAX_BODY_CHARS = 50
 RECENT_REPLY_LIMIT = 5
 CONTEXT_LIMIT = 5
 COPY_PASTE_HISTORY = 20
+SEEN_WEBHOOK_EVENT_LIMIT = 1000
 BOT_CONTEXT_NAME = "木瓜姊"
 
 COMEBACK_LOGGER = logging.getLogger("papaya.comeback")
@@ -525,6 +526,8 @@ _state_lock = threading.Lock()
 _recent_replies = {}
 _recent_context = {}
 _recent_pastes = {}
+_seen_webhook_ids = set()
+_seen_webhook_order = []
 
 _names = {}
 _name_lock = threading.Lock()
@@ -898,6 +901,8 @@ def reset_comeback_state():
         _recent_replies.clear()
         _recent_context.clear()
         _recent_pastes.clear()
+        _seen_webhook_ids.clear()
+        _seen_webhook_order.clear()
 
     clear_display_name_cache()
     clear_group_name_cache()
@@ -913,11 +918,11 @@ def normalize_paste_text(text):
 
 def observe_copy_paste(group_id, user_id, text):
 
-    """Track one eligible message. True on the second identical paste.
+    """Track one eligible message. True from the second identical paste on.
 
-    Whitespace at the ends is ignored. A hit drops that text, so the
-    next copy starts a new pair and fires again on the pair after that.
-    Only the last COPY_PASTE_HISTORY texts for that sender are kept.
+    Whitespace at the ends is ignored. The text stays remembered, so
+    the third, fourth, and later copies each fire too. Only the last
+    COPY_PASTE_HISTORY texts for that sender are kept.
     """
 
     if not isinstance(group_id, str) or group_id == "":
@@ -937,18 +942,54 @@ def observe_copy_paste(group_id, user_id, text):
         history = list(by_user.get(user_id, ()))
 
         if norm in history:
-
-            by_user[user_id] = [
-                item for item in history
-                if item != norm
-            ]
-
             return True
 
         history.append(norm)
         by_user[user_id] = history[-COPY_PASTE_HISTORY:]
 
         return False
+
+
+def accept_webhook_event(event):
+
+    """True when this delivery should be handled.
+
+    Redeliveries are skipped. A webhookEventId is handled once, so
+    one LINE event cannot produce a second reply. Events with no id
+    are still handled; tests and older payloads do not send one.
+    """
+
+    if not isinstance(event, dict):
+        return False
+
+    delivery = event.get("deliveryContext")
+
+    if isinstance(delivery, dict) and delivery.get("isRedelivery") is True:
+        return False
+
+    event_id = event.get("webhookEventId")
+
+    if not isinstance(event_id, str) or event_id == "":
+        return True
+
+    with _state_lock:
+
+        if event_id in _seen_webhook_ids:
+            return False
+
+        _seen_webhook_ids.add(event_id)
+        _seen_webhook_order.append(event_id)
+
+        overflow = len(_seen_webhook_order) - SEEN_WEBHOOK_EVENT_LIMIT
+
+        if overflow > 0:
+
+            for old in _seen_webhook_order[:overflow]:
+                _seen_webhook_ids.discard(old)
+
+            del _seen_webhook_order[:overflow]
+
+        return True
 
 
 def recent_replies(group_id):

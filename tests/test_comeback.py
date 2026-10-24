@@ -1636,15 +1636,23 @@ class HandleTests(unittest.TestCase):
         self.assertLessEqual(len(line), 50)
 
         self.classified.clear()
-        self.assertEqual(self._handle("今天天氣真好"), "not_insult")
-        self.assertEqual(len(self.replies), 1)
-        self.assertEqual(self.classified, ["今天天氣真好"])
+        self.assertEqual(
+            self._handle("今天天氣真好", generate=generate),
+            "copy_paste",
+        )
+        self.assertEqual(self.classified, [])
+        self.assertEqual(len(self.replies), 2)
+        self.assertEqual(
+            self.replies[-1],
+            comeback.COMEBACK_PREFIX + line,
+        )
 
         self.classified.clear()
         self.assertEqual(
             self._handle("今天天氣真好", generate=generate),
             "copy_paste",
         )
+        self.assertEqual(len(self.replies), 3)
         self.assertEqual(
             self.replies[-1],
             comeback.COMEBACK_PREFIX + line,
@@ -1710,7 +1718,7 @@ class HandleTests(unittest.TestCase):
         self.assertFalse(comeback.observe_copy_paste("G", "U2", "甲"))
         self.assertFalse(comeback.observe_copy_paste("G2", "U1", "甲"))
         self.assertTrue(comeback.observe_copy_paste("G", "U1", "甲"))
-        self.assertFalse(comeback.observe_copy_paste("G", "U1", "甲"))
+        self.assertTrue(comeback.observe_copy_paste("G", "U1", "甲"))
         self.assertTrue(comeback.observe_copy_paste("G", "U1", "甲"))
 
         self.assertFalse(comeback.observe_copy_paste("G", "U3", "乙"))
@@ -1718,6 +1726,7 @@ class HandleTests(unittest.TestCase):
             self.assertFalse(
                 comeback.observe_copy_paste("G", "U3", "其他%d" % index)
             )
+        self.assertTrue(comeback.observe_copy_paste("G", "U3", "乙"))
         self.assertTrue(comeback.observe_copy_paste("G", "U3", "乙"))
 
         self.assertFalse(comeback.observe_copy_paste("G", "U4", "丙"))
@@ -1733,6 +1742,46 @@ class HandleTests(unittest.TestCase):
         self.assertFalse(comeback.observe_copy_paste("G", "", "甲"))
         self.assertEqual(comeback.normalize_paste_text("  甲  "), "甲")
         self.assertEqual(comeback.normalize_paste_text(None), "")
+
+        self.assertTrue(
+            comeback.accept_webhook_event({"webhookEventId": "a"})
+        )
+        self.assertFalse(
+            comeback.accept_webhook_event({"webhookEventId": "a"})
+        )
+        self.assertFalse(
+            comeback.accept_webhook_event({
+                "webhookEventId": "fresh",
+                "deliveryContext": {"isRedelivery": True},
+            })
+        )
+        self.assertTrue(
+            comeback.accept_webhook_event({
+                "webhookEventId": "fresh",
+                "deliveryContext": {"isRedelivery": False},
+            })
+        )
+        self.assertTrue(comeback.accept_webhook_event({"type": "message"}))
+        self.assertFalse(
+            comeback.accept_webhook_event({
+                "deliveryContext": {"isRedelivery": True},
+            })
+        )
+        self.assertFalse(comeback.accept_webhook_event(None))
+
+        comeback.reset_comeback_state()
+        self.assertTrue(
+            comeback.accept_webhook_event({"webhookEventId": "a"})
+        )
+        for index in range(comeback.SEEN_WEBHOOK_EVENT_LIMIT):
+            self.assertTrue(
+                comeback.accept_webhook_event({
+                    "webhookEventId": "n%d" % index,
+                })
+            )
+        self.assertTrue(
+            comeback.accept_webhook_event({"webhookEventId": "a"})
+        )
 
 
 class GenerateTests(unittest.TestCase):
@@ -2813,6 +2862,89 @@ class WebhookTests(unittest.TestCase):
             "敬告 Alex Hou：你自己吹自己",
         )
         self.assertNotIn("push", self.posts[0]["url"])
+
+    def test_one_webhook_event_gets_at_most_one_paste_reply(self):
+        text = "難民第三代的邦哥逃避"
+        self._scripted.append(FakeChatResponse("no"))
+        first = self._text_event(
+            text,
+            user_id="Uhung",
+            source_type="group",
+        )
+        first["webhookEventId"] = "evt-1"
+        first["deliveryContext"] = {"isRedelivery": False}
+
+        quiet = self._post_event(first)
+
+        self.assertEqual(quiet.status_code, 200)
+        self.assertEqual(self.posts, [])
+        self.assertEqual(len(self.calls), 1)
+
+        duplicate = self._post_event(first)
+        redelivery = self._text_event(
+            text,
+            user_id="Uhung",
+            source_type="group",
+        )
+        redelivery["webhookEventId"] = "evt-1b"
+        redelivery["deliveryContext"] = {"isRedelivery": True}
+        skipped = self._post_event(redelivery)
+
+        self.assertEqual(duplicate.status_code, 200)
+        self.assertEqual(skipped.status_code, 200)
+        self.assertEqual(self.posts, [])
+        self.assertEqual(len(self.calls), 1)
+
+        line = "敬告 Hung Chang Chen：" + comeback.COPY_PASTE_REPLY
+        for event_id in ("evt-2", "evt-3", "evt-4"):
+            event = self._text_event(
+                text,
+                user_id="Uhung",
+                source_type="group",
+            )
+            event["webhookEventId"] = event_id
+            event["replyToken"] = "token-" + event_id
+            response = self._post_event(event)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(
+                self.posts[-1]["json"]["messages"],
+                [{"type": "text", "text": line}],
+            )
+            self.assertEqual(
+                self.posts[-1]["json"]["replyToken"],
+                "token-" + event_id,
+            )
+
+        self.assertEqual(len(self.posts), 3)
+        self.assertEqual(len(self.calls), 1)
+
+        burst = self._text_event(
+            text,
+            user_id="Uhung",
+            source_type="group",
+        )
+        burst["webhookEventId"] = "evt-burst"
+        burst["replyToken"] = "token-burst"
+        body = json.dumps({
+            "events": [burst, burst, burst, burst],
+        }).encode("utf-8")
+        batched = self.client.post(
+            "/webhook",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Line-Signature": self._sign(body),
+            },
+        )
+
+        self.assertEqual(batched.status_code, 200)
+        self.assertEqual(len(self.posts), 4)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(
+            self.posts[-1]["json"]["replyToken"],
+            "token-burst",
+        )
+        self.assertEqual(len(self.posts[-1]["json"]["messages"]), 1)
 
 
 if __name__ == "__main__":
