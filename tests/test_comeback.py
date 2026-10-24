@@ -1109,8 +1109,8 @@ class HandleTests(unittest.TestCase):
 
         self.classify_result = False
         self.classified.clear()
-        self.assertEqual(self._handle("醜八怪"), "not_insult")
-        self.assertEqual(self.classified, ["醜八怪"])
+        self.assertEqual(self._handle("低能兒"), "not_insult")
+        self.assertEqual(self.classified, ["低能兒"])
         self.assertEqual(len(self.replies), 1)
 
         self.classify_result = True
@@ -1118,7 +1118,7 @@ class HandleTests(unittest.TestCase):
             self._handle("大白癡", "Uother"),
             "not_target",
         )
-        self.assertEqual(self.classified, ["醜八怪"])
+        self.assertEqual(self.classified, ["低能兒"])
 
     def test_recent_replies_stay_per_group_and_reset(self):
         for index in range(6):
@@ -1262,7 +1262,7 @@ class HandleTests(unittest.TestCase):
             return "長" * 51
 
         self.replies.clear()
-        result = self._handle("垃圾AI", generate=too_long)
+        result = self._handle("廢物AI", generate=too_long)
 
         self.assertEqual(result, "comeback")
         self.assertIn(
@@ -1352,7 +1352,7 @@ class HandleTests(unittest.TestCase):
         with self.assertLogs("papaya.comeback", level="INFO") as logs:
             self._handle("垃圾AI", generate=always_line_seven)
             first = self.replies[0]
-            self._handle("垃圾AI", generate=always_line_seven)
+            self._handle("廢物AI", generate=always_line_seven)
             second = self.replies[1]
             self._handle("賤貨", generate=always_line_seven)
 
@@ -1483,9 +1483,13 @@ class HandleTests(unittest.TestCase):
         comeback.reset_comeback_state()
         self.replies.clear()
         bodies = []
-        for _ in range(3):
+        for text in (
+            "幫我吹喇叭可以嗎",
+            "你喜歡被舔嗎",
+            "幫我吹雞吧",
+        ):
             self._handle(
-                "幫我吹喇叭可以嗎",
+                text,
                 "Ualex",
                 training=True,
                 generate=soft_line,
@@ -1599,6 +1603,136 @@ class HandleTests(unittest.TestCase):
         self.assertEqual(result, "comeback")
         self.assertEqual(self.classified, [])
         self.assertEqual(self.replies, ["敬告 群友：你自己吹自己"])
+
+    def test_second_identical_paste_replies_then_resets(self):
+        self.names = {
+            "Uhung": "Hung Chang Chen",
+            "Ualex": "Alex Hou",
+            "Uother": "Someone Else",
+        }
+        self.classify_result = False
+        line = comeback.COPY_PASTE_REPLY
+        seen = []
+
+        def generate(text, quoted=False):
+            seen.append(text)
+            return "就這水準？"
+
+        self.assertEqual(self._handle("  今天天氣真好  "), "not_insult")
+        self.assertEqual(self.replies, [])
+        self.assertEqual(self.classified, ["今天天氣真好"])
+
+        self.classified.clear()
+        result = self._handle("今天天氣真好", generate=generate)
+        self.assertEqual(result, "copy_paste")
+        self.assertEqual(self.classified, [])
+        self.assertEqual(seen, [])
+        self.assertEqual(
+            self.replies,
+            [comeback.COMEBACK_PREFIX + line],
+        )
+        self.assertEqual(ord(comeback.COMEBACK_PREFIX[-1]), 0xFF1A)
+        self.assertIn("死", line)
+        self.assertLessEqual(len(line), 50)
+
+        self.classified.clear()
+        self.assertEqual(self._handle("今天天氣真好"), "not_insult")
+        self.assertEqual(len(self.replies), 1)
+        self.assertEqual(self.classified, ["今天天氣真好"])
+
+        self.classified.clear()
+        self.assertEqual(
+            self._handle("今天天氣真好", generate=generate),
+            "copy_paste",
+        )
+        self.assertEqual(
+            self.replies[-1],
+            comeback.COMEBACK_PREFIX + line,
+        )
+        self.assertEqual(seen, [])
+
+        before = len(self.replies)
+        self.assertEqual(self._handle("同一句", "Uother"), "not_target")
+        self.assertEqual(self._handle("同一句", "Uother"), "not_target")
+        self.assertEqual(len(self.replies), before)
+
+        comeback.reset_comeback_state()
+        self.replies.clear()
+        self.classified.clear()
+        self.assertEqual(
+            self._handle("同一句", "Ualex", training=True),
+            "not_insult",
+        )
+        self.assertEqual(
+            self._handle("同一句", "Ualex", training=True, generate=generate),
+            "copy_paste",
+        )
+        self.assertEqual(self.replies, ["敬告 Alex Hou：" + line])
+        self.assertEqual(seen, [])
+
+        comeback.reset_comeback_state()
+        self.replies.clear()
+        self.assertEqual(self._handle("幹你娘", generate=generate), "profanity")
+        self.assertEqual(self._handle("幹你娘", generate=generate), "profanity")
+        self.assertEqual(
+            self.replies,
+            [comeback.COMEBACK_PREFIX + "你自己操自己"] * 2,
+        )
+        self.assertEqual(seen, [])
+
+        comeback.reset_comeback_state()
+        self.replies.clear()
+        seen.clear()
+        self.assertEqual(self._handle("垃圾AI", generate=generate), "comeback")
+        self.assertEqual(
+            self._handle("垃圾AI", generate=generate),
+            "copy_paste",
+        )
+        self.assertEqual(seen, ["垃圾AI"])
+        self.assertEqual(self.replies[-1], comeback.COMEBACK_PREFIX + line)
+
+        comeback.reset_comeback_state()
+        self.replies.clear()
+        self.classified.clear()
+        self.assertEqual(self._handle("複製 貼上"), "not_insult")
+        self.assertEqual(self._handle("複製貼上"), "not_insult")
+        self.assertEqual(self.replies, [])
+
+        self.assertEqual(self._handle("吵架模式關", "Uowner"), "toggle_off")
+        self.assertEqual(self._handle("關掉之後"), "disabled")
+        self.assertEqual(self._handle("關掉之後"), "disabled")
+        self.assertEqual(self._handle("吵架模式開", "Uowner"), "toggle_on")
+        self.assertEqual(self._handle("關掉之後"), "not_insult")
+        self.assertEqual(len(self.replies), 2)
+
+    def test_copy_paste_is_per_sender_and_forgets_old_text(self):
+        self.assertFalse(comeback.observe_copy_paste("G", "U1", "  甲  "))
+        self.assertFalse(comeback.observe_copy_paste("G", "U2", "甲"))
+        self.assertFalse(comeback.observe_copy_paste("G2", "U1", "甲"))
+        self.assertTrue(comeback.observe_copy_paste("G", "U1", "甲"))
+        self.assertFalse(comeback.observe_copy_paste("G", "U1", "甲"))
+        self.assertTrue(comeback.observe_copy_paste("G", "U1", "甲"))
+
+        self.assertFalse(comeback.observe_copy_paste("G", "U3", "乙"))
+        for index in range(comeback.COPY_PASTE_HISTORY - 1):
+            self.assertFalse(
+                comeback.observe_copy_paste("G", "U3", "其他%d" % index)
+            )
+        self.assertTrue(comeback.observe_copy_paste("G", "U3", "乙"))
+
+        self.assertFalse(comeback.observe_copy_paste("G", "U4", "丙"))
+        for index in range(comeback.COPY_PASTE_HISTORY):
+            self.assertFalse(
+                comeback.observe_copy_paste("G", "U4", "別的%d" % index)
+            )
+        self.assertFalse(comeback.observe_copy_paste("G", "U4", "丙"))
+
+        comeback.reset_comeback_state()
+        self.assertFalse(comeback.observe_copy_paste("G", "U1", "甲"))
+        self.assertFalse(comeback.observe_copy_paste("", "U1", "甲"))
+        self.assertFalse(comeback.observe_copy_paste("G", "", "甲"))
+        self.assertEqual(comeback.normalize_paste_text("  甲  "), "甲")
+        self.assertEqual(comeback.normalize_paste_text(None), "")
 
 
 class GenerateTests(unittest.TestCase):
