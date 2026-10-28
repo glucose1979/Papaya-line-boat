@@ -10,17 +10,17 @@ Other group messages stay silent. Other private messages, `請發送`, `/fix`, `
 
 This bot already sets `OWNER_USER_ID`, so only that user can toggle the mode. Typing either line in the 1:1 private chat or in a group flips the same global switch, which controls group comebacks:
 
-- `吵架模式開`
-- `吵架模式關`
-- `吵架模式狀態`
+- `吵架模式開` / `fight`
+- `吵架模式關` / `close`
+- `吵架模式狀態` / `check`
 
-A trailing `。` or `!` is ignored. Anyone else typing them is ignored. The bot replies in that same chat with `吵架模式開了。`, `吵架模式關了。`, `吵架模式現在是開的。`, or `吵架模式現在是關的。` The status line reports the current global switch and does not change it. These lines are not sent to the private-chat model and are not pushed to the group.
+A trailing `。` or `!` is ignored on the Chinese lines. The English words are the whole message: case does not matter, surrounding whitespace is ignored, and one trailing period is allowed. A sentence that merely contains the word is not a command. Anyone else typing them is ignored. The bot replies in that same chat with `吵架模式開了。`, `吵架模式關了。`, `吵架模式現在是開的。`, or `吵架模式現在是關的。` The status line reports the current global switch and does not change it. These lines are not sent to the private-chat model and are not pushed to the group.
 
-The switch defaults to **on** after deploy. `吵架模式開` / `吵架模式關` override that until the process restarts. A restart or a new deploy clears the in-memory override, the name cache, and each group's recent-reply list, then starts again from `COMEBACK_MODE` (on when that variable is unset). Keep gunicorn at one worker, the same constraint `/dl` already documents, so the override is the one the group sees.
+The switch defaults to **off** after deploy, restart, or a Render wake. `fight` / `吵架模式開` and `close` / `吵架模式關` override that until the process restarts. A restart or a new deploy clears the in-memory override, the name cache, and each group's recent-reply list, then starts again from `COMEBACK_MODE` (off when that variable is unset). Keep gunicorn at one worker, the same constraint `/dl` already documents, so the override is the one the group sees.
 
 | Variable | Required | Default | Meaning |
 | --- | --- | --- | --- |
-| `COMEBACK_MODE` | no | on | Unset, empty, `on`, `1`, or `true` starts enabled. `off`, `0`, `false`, `no`, or `關` starts disabled. |
+| `COMEBACK_MODE` | no | off | Unset or empty starts disabled. `on`, `1`, or `true` starts enabled. `off`, `0`, `false`, `no`, or `關` starts disabled. |
 | `COMEBACK_CLASSIFY_MODEL` | no | `gpt-4o-mini` | Used only for a matched sender, and only when the message is not a keyword hit and is at most 300 characters. That sender is Hung Chang Chen in every group, or anyone in `自動回覆訓練區`. Other senders in other groups are never classified. `gpt-5-mini` is accepted. A failure or a `no` sends nothing. |
 | `COMEBACK_REPLY_MODEL` | no | `gpt-4o-mini` | Writes the comeback body after a trigger, at temperature 1.0. A fixed line is used only when it fits that insult. A new body, not counting the prefix, is at most 50 characters. A timeout or error uses one of the nine fixed lines that this group has not just sent. |
 
