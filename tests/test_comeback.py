@@ -361,29 +361,51 @@ class MatcherTests(unittest.TestCase):
         self.assertIsNone(comeback.parse_toggle("大家好"))
         self.assertIsNone(comeback.parse_toggle(None))
         self.assertIsNone(comeback.parse_toggle("吵架模式狀態"))
+        self.assertTrue(comeback.parse_toggle("fight"))
+        self.assertTrue(comeback.parse_toggle("  FIGHT. "))
+        self.assertTrue(comeback.parse_toggle("Fight。"))
+        self.assertFalse(comeback.parse_toggle("close"))
+        self.assertFalse(comeback.parse_toggle(" Close "))
+        self.assertIsNone(comeback.parse_toggle("fight!"))
+        self.assertIsNone(comeback.parse_toggle("let's fight"))
+        self.assertIsNone(comeback.parse_toggle("fighting"))
+        self.assertIsNone(comeback.parse_toggle("close the door"))
+        self.assertIsNone(comeback.parse_toggle("check"))
 
     def test_status_command_matches_like_the_toggles(self):
         self.assertTrue(comeback.is_status_command("吵架模式狀態"))
         self.assertTrue(comeback.is_status_command("  吵架模式狀態。 "))
         self.assertTrue(comeback.is_status_command("吵架 模式 狀態！"))
+        self.assertTrue(comeback.is_status_command("check"))
+        self.assertTrue(comeback.is_status_command("  CHECK. "))
+        self.assertTrue(comeback.is_status_command("Check。"))
         self.assertFalse(comeback.is_status_command("吵架模式開"))
         self.assertFalse(comeback.is_status_command("吵架模式關"))
         self.assertFalse(comeback.is_status_command("請吵架模式狀態"))
         self.assertFalse(comeback.is_status_command("吵架模式狀態如何"))
+        self.assertFalse(comeback.is_status_command("check this"))
+        self.assertFalse(comeback.is_status_command("check!"))
         self.assertFalse(comeback.is_status_command(None))
 
-    def test_default_on_and_restart_returns_to_env(self):
-        self.assertTrue(comeback.comeback_enabled())
-
-        comeback.set_comeback_enabled(False)
+    def test_default_off_and_restart_returns_to_env(self):
         self.assertFalse(comeback.comeback_enabled())
+
+        comeback.set_comeback_enabled(True)
+        self.assertTrue(comeback.comeback_enabled())
 
         comeback.reset_comeback_state()
-        self.assertTrue(comeback.comeback_enabled())
-
-        os.environ["COMEBACK_MODE"] = "off"
         self.assertFalse(comeback.comeback_enabled())
 
+        os.environ["COMEBACK_MODE"] = ""
+        self.assertFalse(comeback.comeback_enabled())
+
+        os.environ["COMEBACK_MODE"] = "on"
+        self.assertTrue(comeback.comeback_enabled())
+
+        os.environ.pop("COMEBACK_MODE", None)
+        self.assertFalse(comeback.comeback_enabled())
+
+        os.environ["COMEBACK_MODE"] = "off"
         comeback.set_comeback_enabled(True)
         self.assertTrue(comeback.comeback_enabled())
 
@@ -698,7 +720,7 @@ class MatcherTests(unittest.TestCase):
 class HandleTests(unittest.TestCase):
 
     def setUp(self):
-        os.environ.pop("COMEBACK_MODE", None)
+        os.environ["COMEBACK_MODE"] = "on"
         comeback.reset_comeback_state()
         self.replies = []
         self.lookups = []
@@ -962,6 +984,39 @@ class HandleTests(unittest.TestCase):
 
         self.assertEqual(result, "toggle_off")
         self.assertEqual(self.replies, [comeback.TOGGLE_OFF_REPLY])
+        self.assertFalse(comeback.comeback_enabled())
+
+    def test_english_switch_words_follow_the_same_owner_rules(self):
+        os.environ.pop("COMEBACK_MODE", None)
+        comeback.reset_comeback_state()
+        self.names = {
+            "Uhung": "Hung Chang Chen",
+            "Uother": "Someone Else",
+        }
+        self.classify_result = False
+
+        self.assertFalse(comeback.comeback_enabled())
+        self.assertEqual(self._handle("垃圾AI"), "disabled")
+        self.assertEqual(self.lookups, [])
+
+        self.assertEqual(self._handle("  FIGHT. ", "Uowner"), "toggle_on")
+        self.assertEqual(self.replies[-1], comeback.TOGGLE_ON_REPLY)
+        self.assertEqual(self._handle("Check", "Uowner"), "status_on")
+        self.assertEqual(self.replies[-1], comeback.STATUS_ON_REPLY)
+        self.assertEqual(self._handle("垃圾AI"), "comeback")
+
+        self.assertEqual(self._handle("close。", "Uowner"), "toggle_off")
+        self.assertEqual(self._handle("check.", "Uowner"), "status_off")
+        self.assertEqual(self.replies[-1], comeback.STATUS_OFF_REPLY)
+        self.assertEqual(self._handle("垃圾AI"), "disabled")
+
+        before = len(self.replies)
+        self.assertEqual(self._handle("fight", "Uother"), "toggle_ignored")
+        self.assertEqual(self._handle("check", "Uother"), "status_ignored")
+        self.assertEqual(len(self.replies), before)
+        self.assertFalse(comeback.comeback_enabled())
+
+        self.assertEqual(self._handle("let's fight"), "disabled")
         self.assertFalse(comeback.comeback_enabled())
 
     def test_generated_line_keeps_the_prefix_rules(self):
@@ -2146,7 +2201,7 @@ class FakeChatResponse:
 class WebhookTests(unittest.TestCase):
 
     def setUp(self):
-        os.environ.pop("COMEBACK_MODE", None)
+        os.environ["COMEBACK_MODE"] = "on"
         comeback.reset_comeback_state()
         app.clear_chat_memory()
         self.calls = []
@@ -2533,6 +2588,71 @@ class WebhookTests(unittest.TestCase):
         self.assertEqual(len(self.posts), before)
         self.assertEqual(self.calls, [])
         self.assertEqual(self._member_gets(), [])
+        self.assertFalse(comeback.comeback_enabled())
+
+    def test_english_switch_commands_skip_the_chat_model(self):
+        os.environ.pop("COMEBACK_MODE", None)
+        comeback.reset_comeback_state()
+
+        check = self._post_event(self._text_event(" check. "))
+
+        self.assertEqual(check.status_code, 200)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(
+            self.posts[-1]["json"]["messages"][0]["text"],
+            "吵架模式現在是關的。",
+        )
+
+        on = self._post_event(self._text_event("FIGHT"))
+
+        self.assertEqual(on.status_code, 200)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(
+            self.posts[-1]["json"]["messages"][0]["text"],
+            "吵架模式開了。",
+        )
+        self.assertTrue(comeback.comeback_enabled())
+
+        hit = self._post_event(
+            self._text_event(
+                "廢物AI",
+                user_id="Uhung",
+                source_type="group",
+            )
+        )
+        self.assertEqual(hit.status_code, 200)
+        self.assertTrue(
+            self.posts[-1]["json"]["messages"][0]["text"].startswith(
+                comeback.COMEBACK_PREFIX
+            )
+        )
+
+        off = self._post_event(
+            self._text_event(
+                "close。",
+                user_id="Uowner",
+                source_type="group",
+            )
+        )
+        self.assertEqual(off.status_code, 200)
+        self.assertEqual(
+            self.posts[-1]["json"]["messages"][0]["text"],
+            "吵架模式關了。",
+        )
+        self.assertFalse(comeback.comeback_enabled())
+
+        before = len(self.posts)
+        before_calls = len(self.calls)
+        stranger = self._post_event(
+            self._text_event(
+                "fight",
+                user_id="Uhung",
+                source_type="group",
+            )
+        )
+        self.assertEqual(stranger.status_code, 200)
+        self.assertEqual(len(self.posts), before)
+        self.assertEqual(len(self.calls), before_calls)
         self.assertFalse(comeback.comeback_enabled())
 
     def test_profile_failure_still_returns_200(self):

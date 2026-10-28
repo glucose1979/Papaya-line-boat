@@ -24,7 +24,7 @@ The group named 自動回覆訓練區 is the exception: any sender counts,
 and the reply prefix uses that sender's display name. The group name
 comes from LINE Get group summary and is cached per group id.
 
-The on/off switch starts from COMEBACK_MODE (default on). The owner
+The on/off switch starts from COMEBACK_MODE (default off). The owner
 can flip that same global switch from the 1:1 private chat or from a
 group. A process restart drops the override, the display-name
 cache, the group-name cache, the per-group reply history, the
@@ -841,6 +841,22 @@ def _compact_command(text):
     return compact
 
 
+def _english_command_word(text):
+
+    if not isinstance(text, str):
+        return ""
+
+    word = unicodedata.normalize("NFKC", text).strip()
+
+    if word.endswith(".") or word.endswith("。"):
+        word = word[:-1].strip()
+
+    if word == "" or re.search(r"\s", word):
+        return ""
+
+    return word.casefold()
+
+
 def parse_toggle(text):
 
     compact = _compact_command(text)
@@ -851,12 +867,23 @@ def parse_toggle(text):
     if compact == TOGGLE_OFF_TEXT:
         return False
 
+    word = _english_command_word(text)
+
+    if word == "fight":
+        return True
+
+    if word == "close":
+        return False
+
     return None
 
 
 def is_status_command(text):
 
-    return _compact_command(text) == STATUS_TEXT
+    if _compact_command(text) == STATUS_TEXT:
+        return True
+
+    return _english_command_word(text) == "check"
 
 
 def _env_enabled():
@@ -864,12 +891,12 @@ def _env_enabled():
     raw = os.environ.get("COMEBACK_MODE")
 
     if raw is None:
-        return True
+        return False
 
     value = raw.strip().lower()
 
     if value == "":
-        return True
+        return False
 
     return value not in _OFF_VALUES
 
