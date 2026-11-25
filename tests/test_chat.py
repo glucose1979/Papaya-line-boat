@@ -332,6 +332,7 @@ class ChatTests(unittest.TestCase):
 
         self.assertEqual(answer, "查到了，週三上午有門診。")
         self.assertEqual(len(self.calls), 2)
+        self.assertEqual(self.calls[0]["model"], "gpt-6.1-terra")
         self.assertEqual(
             self.calls[0]["reasoning"]["effort"],
             "low"
@@ -339,7 +340,7 @@ class ChatTests(unittest.TestCase):
         self.assertEqual(self.calls[0]["max_output_tokens"], 2000)
         self.assertEqual(
             self.calls[1]["reasoning"]["effort"],
-            "minimal"
+            "none"
         )
         self.assertEqual(self.calls[1]["max_output_tokens"], 3000)
         self.assertEqual(
@@ -376,7 +377,7 @@ class ChatTests(unittest.TestCase):
         self.assertNotIn("tools", self.calls[2])
         self.assertEqual(
             self.calls[2]["reasoning"]["effort"],
-            "minimal"
+            "none"
         )
         self.assertEqual(self.calls[2]["max_output_tokens"], 3000)
 

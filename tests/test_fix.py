@@ -213,9 +213,11 @@ class FixEndpointTests(unittest.TestCase):
             self.calls[0]["reasoning"]["effort"],
             app.FIX_REASONING_EFFORT
         )
+        self.assertEqual(app.FIX_MODEL, "gpt-6.1-terra")
+        self.assertEqual(app.FIX_RETRY_REASONING_EFFORT, "none")
         self.assertEqual(
             self.calls[1]["reasoning"]["effort"],
-            app.FIX_RETRY_REASONING_EFFORT
+            "none"
         )
         self.assertEqual(self.calls[0]["model"], app.FIX_MODEL)
         self.assertNotIn("tools", self.calls[0])

@@ -50,9 +50,10 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 FIX_ALLOWED_ORIGIN = "https://glucose1979.github.io"
 FIX_MAX_CHARS = 6000
 FIX_ALLOWED_LANGS = ("zh-TW", "en-US")
-FIX_MODEL = "gpt-5-mini"
+FIX_MODEL_DEFAULT = "gpt-6.1-terra"
+FIX_MODEL = (os.environ.get("FIX_MODEL") or "").strip() or FIX_MODEL_DEFAULT
 FIX_REASONING_EFFORT = "low"
-FIX_RETRY_REASONING_EFFORT = "minimal"
+FIX_RETRY_REASONING_EFFORT = "none"
 
 # Private audio transcription (POST /transcribe) for the same dictation page.
 # Password is the multipart form field "password" — the same field name /fix
@@ -395,7 +396,7 @@ def push_image_to_group(message_id):
 # =========================================================
 # OpenAI 私訊聊天
 #
-# gpt-5-mini 回覆前會先推理。推理 token 和看得到的回覆
+# gpt-6.1-terra 回覆前會先推理。推理 token 和看得到的回覆
 # 共用 max_output_tokens。沒指定時預設想得比較多，
 # 800 的額度有時被推理用完，output_text 是空的，
 # status 為 incomplete（原因多半是 max_output_tokens）。
@@ -410,10 +411,11 @@ def push_image_to_group(message_id):
 # 沒查就不計搜尋費。每次最多查 2 次，搜尋內容用 low，控制花費。
 # =========================================================
 
-CHAT_MODEL = "gpt-5-mini"
+CHAT_MODEL_DEFAULT = "gpt-6.1-terra"
+CHAT_MODEL = (os.environ.get("CHAT_MODEL") or "").strip() or CHAT_MODEL_DEFAULT
 CHAT_REASONING_EFFORT = "low"
 CHAT_MAX_OUTPUT_TOKENS = 2000
-CHAT_RETRY_REASONING_EFFORT = "minimal"
+CHAT_RETRY_REASONING_EFFORT = "none"
 CHAT_RETRY_MAX_OUTPUT_TOKENS = 3000
 CHAT_MAX_TOOL_CALLS = 2
 CHAT_MEMORY_MAX_EXCHANGES = 10
@@ -756,6 +758,7 @@ def _minimal_web_search_rejected(exc):
     )
     mentions_effort = (
         "minimal" in message
+        or "none" in message
         or "reasoning" in message
         or "not supported" in message
         or "unsupported" in message

@@ -701,6 +701,18 @@ class MatcherTests(unittest.TestCase):
             seen["kwargs"]["reasoning"],
             {"effort": "minimal"},
         )
+        self.assertNotIn("temperature", seen["kwargs"])
+
+        os.environ["COMEBACK_CLASSIFY_MODEL"] = "gpt-6-luna"
+        self.assertFalse(
+            comeback.classify_insult(Client(Response("no")), "這AI有點不行")
+        )
+        self.assertEqual(seen["kwargs"]["model"], "gpt-6-luna")
+        self.assertEqual(
+            seen["kwargs"]["reasoning"],
+            {"effort": "none"},
+        )
+        self.assertNotIn("temperature", seen["kwargs"])
 
         long_text = "問" * 400
         comeback.classify_insult(
@@ -1999,6 +2011,16 @@ class GenerateTests(unittest.TestCase):
 
         self.assertEqual(seen[0]["temperature"], 1.0)
         self.assertNotIn("reasoning", seen[0])
+
+    def test_gpt6_reply_uses_none_effort_and_no_temperature(self):
+        os.environ["COMEBACK_REPLY_MODEL"] = "gpt-6-luna"
+        client, seen = self._client(['{"choice": 0, "text": "就這句。"}'])
+
+        comeback.generate_comeback(client, "醜八怪")
+
+        self.assertEqual(seen[0]["model"], "gpt-6-luna")
+        self.assertEqual(seen[0]["reasoning"], {"effort": "none"})
+        self.assertNotIn("temperature", seen[0])
 
     def test_recent_fixed_line_is_not_reused(self):
         line = comeback.COMEBACK_LINES[6]
