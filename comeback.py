@@ -1401,6 +1401,19 @@ def fetch_group_display_name(
     return name
 
 
+def _reasoning_effort_for(model):
+
+    name = model or ""
+
+    if "gpt-5" in name:
+        return "minimal"
+
+    if "gpt-6" in name:
+        return "none"
+
+    return None
+
+
 def _classify_model():
 
     model = (os.environ.get("COMEBACK_CLASSIFY_MODEL") or "").strip()
@@ -1449,8 +1462,10 @@ def classify_insult(openai_client, text, quoted=False, context=()):
         "timeout": CLASSIFY_TIMEOUT_SECONDS,
     }
 
-    if "gpt-5" in model:
-        kwargs["reasoning"] = {"effort": "minimal"}
+    effort = _reasoning_effort_for(model)
+
+    if effort is not None:
+        kwargs["reasoning"] = {"effort": effort}
         kwargs["max_output_tokens"] = 200
 
     try:
@@ -1634,10 +1649,12 @@ def _request_comeback(
         "timeout": CLASSIFY_TIMEOUT_SECONDS,
     }
 
-    # gpt-5 rejects temperature; sending it fails the call and the
-    # reply falls through to a fixed line.
-    if "gpt-5" in model:
-        kwargs["reasoning"] = {"effort": "minimal"}
+    # Reasoning models reject temperature; sending it fails the call
+    # and the reply falls through to a fixed line.
+    effort = _reasoning_effort_for(model)
+
+    if effort is not None:
+        kwargs["reasoning"] = {"effort": effort}
         kwargs["max_output_tokens"] = 400
     else:
         kwargs["temperature"] = REPLY_TEMPERATURE
